@@ -387,6 +387,30 @@ class TestDeliverResultWrapping:
         )
         return media_file.resolve()
 
+    def test_job_level_wrap_response_false_sends_bare_content(self):
+        """A job's own ``wrap_response: false`` beats the global default."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            job = {
+                "id": "test-job",
+                "name": "ticker",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+                "wrap_response": False,
+            }
+            _deliver_result(job, "NVDA 15:13 — nothing against you")
+
+        sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+        assert sent_content == "NVDA 15:13 — nothing against you"
+        assert "To stop or manage this job" not in sent_content
+
     def test_relay_fronted_home_uses_relay_config_and_live_adapter(self, monkeypatch, tmp_path):
         """Persisted Slack home survives restart without native Slack config."""
         from concurrent.futures import Future
