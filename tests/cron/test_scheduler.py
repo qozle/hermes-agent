@@ -387,6 +387,35 @@ class TestDeliverResultWrapping:
         )
         return media_file.resolve()
 
+    def test_delivery_wraps_content_with_header_only(self):
+        """Wrapped delivery carries the task-name header and NO footer boilerplate."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            job = {
+                "id": "test-job",
+                "name": "daily-report",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+            }
+            _deliver_result(job, "Here is today's summary.")
+
+        send_mock.assert_called_once()
+        sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+        assert "Cronjob Response: daily-report" in sent_content
+        assert "(job_id: test-job)" in sent_content
+        assert "-------------" in sent_content
+        assert "Here is today's summary." in sent_content
+        # Header only: the "stop or manage this job" footer was dropped on purpose
+        # (every wrapped delivery carried the same boilerplate).
+        assert "To stop or manage this job" not in sent_content
+
     def test_job_level_wrap_response_false_sends_bare_content(self):
         """A job's own ``wrap_response: false`` beats the global default."""
         from gateway.config import Platform
