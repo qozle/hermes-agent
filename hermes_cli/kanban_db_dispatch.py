@@ -149,6 +149,9 @@ class DispatchResult:
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
     Reclaim/promotion bookkeeping still ran; deferred tasks stay queued."""
+    reaped_scopes: list[str] = field(default_factory=list)
+    """Worker scope units stopped because their card already left ``running``
+    (see :func:`hermes_cli.kanban_db_reap.reap_finished_worker_scopes`)."""
 
 
 def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
@@ -2230,6 +2233,16 @@ def _run_reclaim_phase(
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
     result.timed_out = enforce_max_runtime(conn)
+    # A worker whose card already left ``running`` (kanban_complete /
+    # kanban_request_review / kanban_block) is no longer tracked by anything
+    # above — its run is closed — yet the process and its scope keep holding an
+    # API session. Stop those here, AFTER the reclaim paths have had their say
+    # so a scope this tick just reclaimed is never double-signalled.
+    try:
+        result.reaped_scopes = reap_finished_worker_scopes(conn)
+    except Exception:
+        # Scope hygiene must never break a dispatcher tick.
+        _kb._log.debug("kanban reap: finished-scope sweep failed", exc_info=True)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 
@@ -3000,3 +3013,6 @@ def run_daemon(
 from hermes_cli import kanban_db as _kb
 from hermes_cli import kanban_db_connect as _kbc
 from hermes_cli import kanban_db_workspace as _kbw
+# Bound here (not called through the module) so tests patch the name production
+# reads — root AGENTS.md "patch where production reads".
+from hermes_cli.kanban_db_reap import reap_finished_worker_scopes

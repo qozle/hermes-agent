@@ -1963,6 +1963,12 @@ DEFAULT_CONFIG = {
         # claim_expires NULL with a dead worker) that TTL/crash/stale recovery can't see. False
         # keeps orphans frozen for manual forensics.
         "reconcile_orphans": True,
+        # A worker that called kanban_complete / kanban_request_review / kanban_block keeps
+        # running: its card left 'running' so the dispatcher no longer tracks it, but the
+        # process and its hermes-worker-kanban-<id>-run-<n>.scope still hold an API session.
+        # Each tick stops those scopes (SIGTERM via `systemctl --user stop`, thawing a frozen
+        # one first). False leaves them for manual forensics.
+        "reap_finished_worker_scopes": True,
         # Notify subscriptions survive `done` (completion is reversible) and are removed on archive.
         # On boards that never archive, the notifier GC purges subscriptions for tasks done with no
         # activity for this many days so stale rows aren't scanned forever. 0 = off.
