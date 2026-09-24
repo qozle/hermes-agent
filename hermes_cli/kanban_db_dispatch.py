@@ -2723,6 +2723,36 @@ def _open_worker_log(task: Task, board: Optional[str]):
     return open(log_path, "ab")
 
 
+def _sandbox_worker_argv(command: list[str]) -> list[str]:
+    """Wrap a worker in the bubblewrap jail (LOCAL COMMIT, frankentrait 2026-09-23).
+
+    Re-apply after ``hermes update``; see the hermes-instance-admin skill's
+    local-commit register.  Off when ``kanban.sandbox_workers`` is false, when
+    the wrapper or bwrap is missing, or when HERMES_KANBAN_NO_SANDBOX=1.
+    """
+    import os
+    import shutil
+
+    if os.environ.get("HERMES_KANBAN_NO_SANDBOX") == "1":
+        return command
+    try:
+        from hermes_cli.config_effective import load_user_config_effective
+
+        cfg = load_user_config_effective() or {}
+        if not (cfg.get("kanban") or {}).get("sandbox_workers", True):
+            return command
+    except Exception:
+        pass
+    from hermes_constants import get_hermes_home
+
+    wrapper = Path(get_hermes_home()) / "scripts" / "kanban-worker-sandbox"
+    if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
+        return command
+    if not shutil.which("bwrap"):
+        return command
+    return [str(wrapper), *command]
+
+
 def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
     """Wrap a systemd-hosted dispatcher's worker in the shared restart-safe scope.
 
@@ -2871,6 +2901,13 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     env.pop("HERMES_TUI", None)
 
     cmd = _worker_argv(task, profile_arg, env.get("HERMES_HOME"))
+    # LOCAL COMMIT (frankentrait, 2026-09-23): jail the worker.  A worker's
+    # mutation-test harness ran a fixture cleanup against the REAL $HOME on
+    # 2026-09-23 00:49 and deleted nearly all of /home/maxterd (card
+    # t_29bc66e3).  The wrapper makes the filesystem read-only except the
+    # workspace, the board DB and the worker's own profile state.  Gate:
+    # kanban.sandbox_workers (default on here); escape: HERMES_KANBAN_NO_SANDBOX=1.
+    cmd = _sandbox_worker_argv(cmd)
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.
