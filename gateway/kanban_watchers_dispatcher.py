@@ -184,6 +184,13 @@ class _KanbanDispatcher:
         if not self._quarantine_lifted(slug, fingerprint):
             return None
         kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
+        # LOCAL COMMIT (frankentrait): re-resolve the host-level cap every tick
+        # so `hermes config set kanban.max_in_progress N` bites within one tick
+        # instead of at the next gateway cycle (config load is mtime-cached).
+        # This is Max's live throttle; the standalone daemon loop already does
+        # the same (see run_dispatcher_loop).
+        kbd = _kbd()
+        kwargs["max_in_progress"] = kbd.resolve_max_in_progress(kbd.configured_max_in_progress())
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).
