@@ -920,6 +920,23 @@ def test_worker_lifecycle_through_tools(worker_env):
 # ---------------------------------------------------------------------------
 
 
+def test_kanban_guidance_one_card_one_session():
+    """A `ctx:` comment (the spend guard's worker context watch, 200K input
+    tokens) must route a worker to child-card the remainder instead of grinding
+    on in a thread every turn re-reads in full. The contract, not the wording:
+    the rule names the comment prefix, the child card with this card as parent,
+    and completion of what IS done."""
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    assert "One card = one session" in KANBAN_GUIDANCE
+    assert "`ctx:` comment" in KANBAN_GUIDANCE
+    assert "parents=[your id]" in KANBAN_GUIDANCE
+    assert "Never grind past the nudge" in KANBAN_GUIDANCE
+    # The instruction is to SPLIT, never to stop: completing with the work done
+    # is what releases the child.
+    assert "`kanban_complete` with what IS done" in KANBAN_GUIDANCE
+
+
 # ---------------------------------------------------------------------------
 # Worker task-ownership enforcement (regression tests for #19534)
 # ---------------------------------------------------------------------------
