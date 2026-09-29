@@ -44,6 +44,22 @@ ITERATION_BUDGET_WARNING_TEMPLATE = (
     "solely because of this warning."
 )
 
+# Kanban workers get a distinct notice at a lower default ratio (0.8, not 0.9): the
+# heavy tail on a kanban card (PR -> merge -> mirror -> report -> kanban_complete) is
+# long enough that "checkpoint and continue" burns the remaining budget on new work and
+# the hard cap lands before kanban_complete ever runs. This tells the worker to wrap up
+# instead, same rule as the spend-guard context nudge (KANBAN_GUIDANCE rule 8): land
+# what is done, kanban_complete with what IS done, kanban_create a child card for the
+# rest. Non-kanban sessions are untouched — they keep ITERATION_BUDGET_WARNING_TEMPLATE.
+KANBAN_ITERATION_BUDGET_WRAPUP_TEMPLATE = (
+    "[SYSTEM NOTICE — iteration budget checkpoint] You have used {used} of {maximum} "
+    "iterations — ~{remaining} calls left. Wrap up now: land what is done (commit/PR/merge/mirror "
+    "as the card requires), then `kanban_complete` with what IS done (or `kanban_request_review` if the "
+    "card is ready for review) and `kanban_create` a child "
+    "card (same assignee, `parents=[<this id>]`) for anything still undone. Do not start new work. "
+    "A card that hits the hard cap is booked `timed_out` and its completion is lost."
+)
+
 
 def _maybe_inject_iteration_budget_warning(agent: Any, messages: Any) -> bool:
     """Append the opt-in one-shot warning to the newest tool result."""
@@ -61,7 +77,7 @@ def _maybe_inject_iteration_budget_warning(agent: Any, messages: Any) -> bool:
         and "kanban_complete" in getattr(agent, "valid_tool_names", ())
     )
     if ratio is None and kanban_worker:
-        ratio = 0.9
+        ratio = 0.8
     budget = getattr(agent, "iteration_budget", None)
     if (
         ratio is None
@@ -72,15 +88,14 @@ def _maybe_inject_iteration_budget_warning(agent: Any, messages: Any) -> bool:
         or budget.used < min(ratio * budget.max_total, budget.max_total - 1)
     ):
         return False
-    notice = ITERATION_BUDGET_WARNING_TEMPLATE.format(
-        used=budget.used, maximum=budget.max_total
-    )
     if kanban_worker:
-        notice += (
-            " While tools are still available, call kanban_complete only if all task "
-            "requirements are verified, or kanban_request_review if it is ready for "
-            "review; otherwise persist a kanban_comment handoff and "
-            "continue. A diff or commit alone is not completion evidence."
+        notice = KANBAN_ITERATION_BUDGET_WRAPUP_TEMPLATE.format(
+            used=budget.used, maximum=budget.max_total,
+            remaining=max(budget.max_total - budget.used, 0),
+        )
+    else:
+        notice = ITERATION_BUDGET_WARNING_TEMPLATE.format(
+            used=budget.used, maximum=budget.max_total
         )
     # Only the current tool-result tail is mutable; an older turn may already be cached.
     from agent.context_compressor import _DB_PERSISTED_MARKER
