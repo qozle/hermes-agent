@@ -184,9 +184,18 @@ function splitLongMessage(message, maxLength = MAX_MESSAGE_LENGTH) {
   while (remaining.length > maxLength) {
     let splitAt = remaining.lastIndexOf('\n', maxLength);
     if (splitAt < Math.floor(maxLength / 2)) {
-      splitAt = remaining.lastIndexOf(' ', maxLength);
+      const atSpace = remaining.lastIndexOf(' ', maxLength);
+      // A tiny space-split means the next token is huge; keep whole lines together instead.
+      if (atSpace >= Math.floor(maxLength / 2) || splitAt < 1) splitAt = atSpace;
     }
-    if (splitAt < 1) splitAt = maxLength;
+    if (splitAt < 1) {
+      // The head is one unbroken token (a URL, a long command). A hard cut would
+      // split it across two messages and break copy-paste, so run to the next
+      // whitespace instead; WhatsApp accepts far longer texts than this cap.
+      const next = remaining.slice(1).search(/\s/);
+      if (next < 0) break;
+      splitAt = next + 1;
+    }
 
     chunks.push(remaining.slice(0, splitAt).trimEnd());
     remaining = remaining.slice(splitAt).trimStart();
