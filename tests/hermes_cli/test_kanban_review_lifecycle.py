@@ -453,9 +453,9 @@ def test_active_pr_guard_skipped_for_review_lane_but_defers_ready_lane(
             conn, review_id, summary="PR ready",
             expected_run_id=claimed.current_run_id,
         )
-        # Ready-lane task with the same fresh PR comment.
+        # Ready-lane task with the same fresh PR comment, posted by its own run.
         ready_id = kb.create_task(conn, title="already PRed", assignee="worker")
-        kb.add_comment(conn, ready_id, author="worker", body=pr_comment)
+        _own_pr_comment(conn, ready_id, "worker", pr_comment)
 
         assert kbd.check_respawn_guard(conn, ready_id) == "active_pr"
         assert kbd.check_respawn_guard(conn, review_id, lane="review") is None
@@ -491,6 +491,89 @@ def _backdate_comments(conn, tid, seconds=60):
             "UPDATE task_comments SET created_at = created_at - ? WHERE task_id = ?",
             (seconds, tid),
         )
+        # Keep the comment inside its own run (the active_pr guard requires it).
+        conn.execute(
+            "UPDATE task_runs SET started_at = started_at - ?, "
+            "ended_at = CASE WHEN ended_at IS NULL THEN NULL ELSE ended_at - ? END "
+            "WHERE task_id = ?",
+            (seconds, seconds, tid),
+        )
+
+
+def _own_pr_comment(conn, tid, author, body, *, age=0):
+    """Post ``body`` the way the card's OWN worker does: inside a closed run of
+    ``tid`` by ``author``. ``age`` shifts the whole thing into the past."""
+    now = int(__import__("time").time()) - age
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, outcome, "
+            "started_at, ended_at) VALUES (?, ?, 'reclaimed', 'reclaimed', ?, ?)",
+            (tid, author, now - 30, now + 1),
+        )
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (tid, author, body, now),
+        )
+
+
+def test_active_pr_guard_ignores_pr_links_posted_outside_the_cards_own_runs(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PR URL on a card is duplicate-work evidence only when that card's own
+    worker posted it — i.e. during one of the card's runs.
+
+    A sibling card's worker posting "PR #914 is merged, you rebase" on a card
+    that has never run, or an operator quoting the PR a merge card must land,
+    held t_0395d397 in ``ready`` for 11 hours under the old comment-only rule.
+    """
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    pr_comment = "Heads-up: https://github.com/example/repo/pull/914 is merged — rebase."
+
+    with kbc.connect() as conn:
+        never_ran = kb.create_task(conn, title="never ran", assignee="worker")
+        kb.add_comment(conn, never_ran, author="worker", body=pr_comment)
+        assert kbd.check_respawn_guard(conn, never_ran) is None
+        res = kbd.dispatch_once(conn, dry_run=True)
+        assert never_ran in [s[0] for s in res.spawned]
+
+        # Same text posted by the card's own run still guards.
+        own = kb.create_task(conn, title="own pr", assignee="worker")
+        _own_pr_comment(conn, own, "worker", pr_comment)
+        assert kbd.check_respawn_guard(conn, own) == "active_pr"
+
+        # A cross-card comment that arrives AFTER the card's own run closed
+        # (outside the grace) is still not this card's PR.
+        ran_before = kb.create_task(conn, title="ran earlier", assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, "
+                "started_at, ended_at) VALUES (?, 'worker', 'reclaimed', "
+                "'reclaimed', ?, ?)",
+                (ran_before, int(__import__("time").time()) - 7200,
+                 int(__import__("time").time()) - 7000),
+            )
+        kb.add_comment(conn, ran_before, author="worker", body=pr_comment)
+        assert kbd.check_respawn_guard(conn, ran_before) is None
+
+        # A comment landing just after the run row closed (worker's last word
+        # before its process exits) is still the worker's — within the grace.
+        late = kb.create_task(conn, title="late comment", assignee="worker")
+        _now = int(__import__("time").time())
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, "
+                "started_at, ended_at) VALUES (?, 'worker', 'completed', "
+                "'completed', ?, ?)",
+                (late, _now - 600, _now - 60),
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'ready' WHERE id = ?", (late,),
+            )
+        kb.add_comment(conn, late, author="worker", body=pr_comment)
+        assert kbd.check_respawn_guard(conn, late) in ("active_pr", "recent_success")
 
 
 def test_active_pr_guard_lifts_for_profile_handed_the_card_after_the_pr(
@@ -515,9 +598,9 @@ def test_active_pr_guard_lifts_for_profile_handed_the_card_after_the_pr(
 
     with kbc.connect() as conn:
         dev_id = kb.create_task(conn, title="dev own pr", assignee="dev")
-        kb.add_comment(conn, dev_id, author="dev", body=pr_comment)
+        _own_pr_comment(conn, dev_id, "dev", pr_comment)
         closer_id = kb.create_task(conn, title="closer recovery", assignee="dev")
-        kb.add_comment(conn, closer_id, author="dev", body=pr_comment)
+        _own_pr_comment(conn, closer_id, "dev", pr_comment)
         _backdate_comments(conn, closer_id)
         assert kb.assign_task(conn, closer_id, "closer") is True
 
@@ -528,9 +611,9 @@ def test_active_pr_guard_lifts_for_profile_handed_the_card_after_the_pr(
         assert closer_id in [s[0] for s in res.spawned]
         assert dict(res.respawn_guarded).get(dev_id) == "active_pr"
 
-        kb.add_comment(
-            conn, closer_id, author="closer",
-            body="Pushed to https://github.com/example/repo/pull/44",
+        _own_pr_comment(
+            conn, closer_id, "closer",
+            "Pushed to https://github.com/example/repo/pull/44",
         )
         assert kbd.check_respawn_guard(conn, closer_id) == "active_pr"
 
@@ -553,7 +636,7 @@ def test_active_pr_guard_holds_through_same_profile_reassign_and_unassign(
     pr_comment = "Opened https://github.com/example/repo/pull/44 for review."
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="same assign", assignee="dev")
-        kb.add_comment(conn, tid, author="dev", body=pr_comment)
+        _own_pr_comment(conn, tid, "dev", pr_comment)
         _backdate_comments(conn, tid)
         assert kb.assign_task(conn, tid, "dev") is True
         assert kbd.check_respawn_guard(conn, tid) == "active_pr"

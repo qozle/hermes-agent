@@ -82,6 +82,15 @@ DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 300  # 5 minutes
 # Within this window a GitHub PR URL in a comment blocks re-spawn.
 _RESPAWN_GUARD_PR_WINDOW = 86400  # 24 hours
 
+# A PR-URL comment is duplicate-work evidence only when THIS card's own worker
+# posted it, i.e. it landed while a run of this card was live. Workers post
+# cross-card heads-ups ("sibling PR #914 merged — you rebase") and operators
+# post merge instructions on cards that have never run; neither means a PR was
+# opened for this card, and one such comment parked a never-run ready card for
+# 11 hours. A worker's last comment can land a few seconds after its run row is
+# closed, hence the grace.
+_RESPAWN_GUARD_PR_RUN_GRACE = 300  # 5 minutes
+
 _RESPAWN_GUARD_PR_URL_RE = re.compile(
     r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+",
     re.IGNORECASE,
@@ -1506,7 +1515,8 @@ def check_respawn_guard(
     (quota/auth pattern; the breaker still trips eventually), then for the
     ready lane only ``"recent_success"`` (completed run within the window, unless
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
-    (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
+    (PR URL in a recent comment posted during one of this card's own runs;
+    re-spawning risks a duplicate PR — unless a
     handoff event followed the comment: the named profile must work on that
     PR). The review lane skips the last two: they are the *inputs* to a review
     handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
@@ -1589,6 +1599,9 @@ def check_respawn_guard(
             return "recent_success"
 
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
+    #    Only a comment posted during one of THIS card's runs counts (see
+    #    _RESPAWN_GUARD_PR_RUN_GRACE): a sibling card's worker or an operator
+    #    quoting a PR on a card that never ran is not that card's PR.
     #    Exception: a handoff AFTER the newest PR comment (operator reassign,
     #    reviewer changes_requested, review reopen) names the profile that must
     #    now work on THAT PR — a closer or the implementer finishing it, not a
@@ -1603,18 +1616,34 @@ def check_respawn_guard(
         body = _kb._lossy_text(c["body"])
         if not (body and _RESPAWN_GUARD_PR_URL_RE.search(body)):
             continue
+        posted_at = int(c["created_at"] or 0)
+        if not _comment_posted_by_a_run_of(conn, task_id, posted_at):
+            continue
         events = conn.execute(
             # Strictly after: a same-second tie stays guarded (fail closed).
             "SELECT kind, payload FROM task_events "
             "WHERE task_id = ? AND created_at > ? "
             "AND kind IN ('assigned', 'changes_requested', 'review_reopened')",
-            (task_id, int(c["created_at"] or 0)),
+            (task_id, posted_at),
         ).fetchall()
         if any(_is_handoff_event(e["kind"], e["payload"]) for e in events):
             return None
         return "active_pr"
 
     return None
+
+
+def _comment_posted_by_a_run_of(
+    conn: sqlite3.Connection, task_id: str, posted_at: int,
+) -> bool:
+    """True when ``posted_at`` falls inside a run of ``task_id`` (open, or closed
+    no more than ``_RESPAWN_GUARD_PR_RUN_GRACE`` seconds earlier) — the only way
+    a PR comment can be this card's own worker speaking."""
+    return conn.execute(
+        "SELECT 1 FROM task_runs WHERE task_id = ? AND started_at <= ? "
+        "AND (ended_at IS NULL OR ended_at + ? >= ?) LIMIT 1",
+        (task_id, posted_at, _RESPAWN_GUARD_PR_RUN_GRACE, posted_at),
+    ).fetchone() is not None
 
 
 def _is_handoff_event(kind: str, payload: Optional[str]) -> bool:
