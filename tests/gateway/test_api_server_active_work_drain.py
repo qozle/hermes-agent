@@ -153,13 +153,16 @@ class TestDrainWaitsForApiWork:
 
                 assert api._active_run_agents == {}
                 assert runner._active_api_run_count() == 1
-                drain_task = original_create_task(runner._drain_active_agents(2.0))
+                drain_task = original_create_task(runner._drain_active_agents(20.0))
                 await asyncio.sleep(0.1)
                 assert not drain_task.done()
 
                 allow_task.set()
                 _snapshot, timed_out = await drain_task
 
+        # 2.0 s was a hang guard, not the contract: the queued run's first act is
+        # api_server_run_idempotency.__init__ opening state.db (WAL + schema init,
+        # ~1.5 s on a busy disk), which alone ate the window under a loaded suite.
         assert timed_out is False
 
     @pytest.mark.asyncio

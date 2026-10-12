@@ -142,6 +142,10 @@ def _install_compression_failure_agent(monkeypatch, agent_cls=_CompressionThenFa
 
 
 def _run_compression_failure_turn(runner, source, *, run_generation=None):
+    # 20 s is a hang guard, not a latency contract: the turn's first act in a fresh
+    # process imports tools.process_registry, whose ProcessRegistry.__init__ opens
+    # state.db twice (WAL + schema reconcile) — 1-4 s on a busy disk, which alone
+    # exceeded the old 2 s bound under a loaded parallel suite.
     return asyncio.run(
         asyncio.wait_for(
             runner._run_agent(
@@ -153,7 +157,7 @@ def _run_compression_failure_turn(runner, source, *, run_generation=None):
                 session_key=SESSION_KEY,
                 run_generation=run_generation,
             ),
-            timeout=2,
+            timeout=20,
         )
     )
 
