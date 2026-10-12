@@ -67,7 +67,10 @@ def _service(db_path, *, profiles=("default",)):
     return service, rpc
 
 
-def _wait_for(predicate, timeout=3.0):
+def _wait_for(predicate, timeout=20.0):
+    # A hang guard, not a latency assertion: the predicate waits on two real worker
+    # threads that each open state.db (WAL + schema init, 1-2 s apiece on a busy disk),
+    # so a tight bound fails under a loaded parallel suite without finding anything.
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
