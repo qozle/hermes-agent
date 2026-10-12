@@ -30,7 +30,7 @@ def finish_interrupted_run(job, execution_id, delivery_error):
 def _classify_delivery_outcome(
     *, delivery_error, should_deliver: bool, unresolved_origin: bool,
     normalized_deliver: str, incident_acked: bool, success: bool,
-    delivery_queued=None, notification_suppressed: bool = False,
+    delivery_queued=None, notification_suppressed: bool = False, woke_origin: bool = False,
 ) -> str:
     if delivery_error:
         return "failed"
@@ -40,6 +40,11 @@ def _classify_delivery_outcome(
         return "suppressed"
     if should_deliver and unresolved_origin:
         return "not_configured"
+    if should_deliver and woke_origin:
+        # A wake IS a delivery: the output reached an agent that will act on it. Without this a
+        # successful `deliver: local` + `wake_origin` run records "suppressed" and a failure
+        # incident never gets marked alerted, so the ledger would under-report real notices.
+        return "delivered"
     if should_deliver and normalized_deliver != "local":
         return "delivered"
     if incident_acked and not success:
@@ -103,6 +108,7 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
             scheduler._delivery_lane_value(job, for_failure=not d.success)),
         incident_acked=d.incident_acked,
         success=d.success,
+        woke_origin=bool(job.pop("_wake_origin_delivered", False)),
     )
     from cron.delivery_outcome import settle_quietly, settled_outcome
     if delivery_outcome == "queued":

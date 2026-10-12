@@ -3204,6 +3204,7 @@ def _deliver_crash_failure(
         delivery_error=delivery_error, should_deliver=True, unresolved_origin=unresolved_origin,
         normalized_deliver=normalized_deliver, incident_acked=False, success=False,
         delivery_queued=job.get("last_delivery_queued"),
+        woke_origin=bool(job.pop("_wake_origin_delivered", False)),
         notification_suppressed=bool(job.get("_notification_all_targets_suppressed")))
     if delivery_outcome in ("delivered", "not_configured"):
         _mark_incident_alerted(failure_incident_id)
