@@ -99,6 +99,10 @@ def _origin_from_env(
     return {
         "platform": origin_platform, "chat_id": origin_chat_id,
         "chat_name": get_session_env("HERMES_SESSION_CHAT_NAME") or None, "thread_id": thread_id,
+        # DM/group/thread key the session differently, so a wake_origin delivery that has to guess
+        # this lands in a brand-new session nobody reads. Capture it at creation; older jobs fall
+        # back to a live-session lookup (cron/wake_origin.py).
+        "chat_type": get_session_env("HERMES_SESSION_CHAT_TYPE") or None,
         # Lets a delivery mirror resolve the participant's session in per-user-isolated groups.
         "user_id": get_session_env("HERMES_SESSION_USER_ID") or None,
         # Workspace/server scope (Slack team, Discord guild...): Slack session keys embed it,
@@ -419,7 +423,7 @@ def _validate_context_from_refs(refs: List[Any]) -> Optional[str]:
 # Optional fields echoed by _format_job only when truthy (order = JSON key order).
 _FORMAT_JOB_OPTIONAL_KEYS = (
     "script", "reasoning_effort", "monitor_script", "monitor_url",
-    "monitor_state", "no_agent", "enabled_toolsets", "workdir")
+    "monitor_state", "no_agent", "enabled_toolsets", "workdir", "wake_origin")
 
 
 def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:

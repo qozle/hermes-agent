@@ -83,6 +83,12 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "into its prompt, so it can dedupe against what was already "
             "reported and continue where the last run left off (scouts, "
             "monitors, incremental digests). First run is unchanged.")
+    cron_create.add_argument(
+        "--wake-origin", dest="wake_origin", action="store_const", const=True, default=None,
+        help="Also inject this job's output into the origin session as a turn, so the agent "
+            "there sees it and decides what to do. Orthogonal to --deliver (which posts a "
+            "message a human reads); --deliver local --wake-origin is the \"tell the agent, "
+            "not me\" combination. Never fires on a run that had nothing to say.")
 
     _flag(cron_create, "--paused", default=False,
         help="Create disabled in one write; resume to schedule, or explicitly run now.")
@@ -144,6 +150,14 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         help="Pin this job's reasoning (thinking) effort: none, minimal, low, "
             "medium, high, xhigh, max, or ultra. Pass empty string to clear "
             "the pin and follow config resolution.")
+    _wake = cron_edit.add_mutually_exclusive_group()
+    _wake.add_argument(
+        "--wake-origin", dest="wake_origin", action="store_const", const=True, default=None,
+        help="Also inject this job's output into the origin session as a turn, so the agent "
+            "there sees it and decides what to do (orthogonal to --deliver; never fires on a "
+            "run that had nothing to say).")
+    _wake.add_argument("--no-wake-origin", dest="wake_origin", action="store_const", const=False,
+        help="Stop injecting this job's output into the origin session.")
 
     # lifecycle actions
     cron_pause = cron_subparsers.add_parser("pause", help="Pause a scheduled job")

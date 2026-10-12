@@ -1912,20 +1912,30 @@ def _deliver_result(
     ``failure_deliver`` override when present (NS-788). Returns None on success, else an error."""
     job.pop("_bot_chat_delivery_receipts", None)
     job.pop("_notification_all_targets_suppressed", None)
+    job.pop("_wake_origin_delivered", None)
     targets = _resolve_delivery_targets(job, for_failure=for_failure)
-    if not targets:
-        _record_delivery_verification(job, [])
-        return _unresolved_delivery_outcome(job, for_failure)
+    # ``wake_origin`` is orthogonal to ``deliver``: the chat lanes below send a message a HUMAN
+    # reads, the wake hands the same text to the AGENT in the origin conversation as a turn
+    # (cron/wake_origin.py). A run that reached here is never silent — `_save_compose_deliver`
+    # returns before calling us when there was nothing to say — so the wake inherits that gate.
+    wake_requested = bool(job.get("wake_origin"))
 
     # Restart-safe workers have no live gateway adapters: hand the send back through a durable
     # queue so the current or replacement gateway performs it with relay/E2EE parity. The execution
     # id is the idempotency key (the queue never retries an uncertain claimed send). Match on THIS
     # job's own attempt: a worker's script may dispatch another job in-process (`hermes cron run`),
     # and that nested delivery must not be keyed under the outer execution id.
+    #
+    # This sits ABOVE the `if not targets` return: a `deliver: local` + `wake_origin` job resolves
+    # no targets, and the gateway drain of this queue is the ONLY way its output reaches a process
+    # that holds live adapters. A bot-chat-only job that also sets `wake_origin` now queues too, so
+    # its bot-chat turn is performed by the gateway rather than the worker — once, not twice (the
+    # worker returns immediately after `enqueue_and_wait`).
     external_execution = os.environ.get("_HERMES_CRON_EXTERNAL_WORKER", "")
     if (external_execution and adapters is None
             and external_execution == str(job.get("execution_id") or "")
-            and any(target["platform"] != BOT_CHAT_PLATFORM for target in targets)):
+            and (wake_requested
+                 or any(target["platform"] != BOT_CHAT_PLATFORM for target in targets))):
         from cron.delivery_queue import enqueue_and_wait
 
         _record_delivery_verification(job, [])
@@ -1938,6 +1948,14 @@ def _deliver_result(
         refreshed = get_job(job["id"]) or {}
         job["last_delivery_queued"] = refreshed.get("last_delivery_queued")
         return error
+
+    if not targets:
+        _record_delivery_verification(job, [])
+        outcome = _unresolved_delivery_outcome(job, for_failure)
+        if wake_requested:
+            return _wake_origin.wake_origin_session(
+                job, content, adapters=adapters, loop=loop) or outcome
+        return outcome
 
     from gateway.config import load_gateway_config
 
@@ -2054,6 +2072,12 @@ def _deliver_result(
         job["_notification_all_targets_suppressed"] = True
     else:
         delivery_errors.extend(policy_drop_errors)
+    if wake_requested:
+        # AFTER the chat sends: a failed wake is reported, never allowed to block a delivery that
+        # already left the process.
+        wake_error = _wake_origin.wake_origin_session(job, content, adapters=adapters, loop=loop)
+        if wake_error:
+            delivery_errors.append(wake_error)
     _record_delivery_verification(job, unverified_targets)
     return "; ".join(delivery_errors) if delivery_errors else None
 
@@ -2063,3 +2087,4 @@ def _deliver_result(
 from cron import scheduler as _sched  # noqa: E402
 from cron import scheduler_preflight as _preflight  # noqa: E402
 from cron import scheduler_script as _script  # noqa: E402
+from cron import wake_origin as _wake_origin  # noqa: E402

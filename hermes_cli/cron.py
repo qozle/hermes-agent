@@ -235,6 +235,8 @@ def _job_rows(job: Dict[str, Any]) -> List[tuple[str, str]]:
         ("Mode", color("no-agent", Colors.DIM) + " (script stdout delivered directly)"
          if job.get("no_agent") else ""),
         ("Workdir", job.get("workdir")),
+        ("Wake origin", "on (output is injected into the origin session as a turn)"
+         if job.get("wake_origin") else ""),
         ("Last run", f"{job.get('last_run_at', '?')}  {_last_run_display(job)}"
          if job.get("last_status") else ""),
         ("Dispatch", _dispatch_display(job.get("last_dispatch"))),
@@ -671,7 +673,8 @@ _JOB_ARG_FIELDS = (("name", "name"), ("deliver", "deliver"), ("failure_deliver",
                    ("repeat", "repeat"), ("script", "script"), ("workdir", "workdir"),
                    ("model", "model"), ("provider", "model_provider"), ("pinned", "pinned"),
                    ("monitor_script", "monitor_script"), ("monitor_url", "monitor_url"),
-                   ("continuity", "continuity"), ("reasoning_effort", "reasoning_effort"))
+                   ("continuity", "continuity"), ("reasoning_effort", "reasoning_effort"),
+                   ("wake_origin", "wake_origin"))
 
 
 def _job_api_kwargs(args) -> Dict[str, Any]:

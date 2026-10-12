@@ -604,6 +604,34 @@ error. A delivery failure does not count toward the job's `failure_streak`
 - **Queued is not completed.** Cron records receipt IDs and `queued`/`claimed` statuses in `last_delivery_queued`, with delivery outcome `queued` (neither delivered nor failed). A successful job shows `delivery_queued`; genuine errors on other targets still take precedence as delivery failures. The bot may complete later. The durable receipt in the target profile's `runtime/bot_live_delivery/<receipt-id>.json` is authoritative; cron's historical status is not automatically refreshed.
 - Rechecking the same execution inspects its existing receipt, even if the owner has disappeared. It never falls back to another writer after acceptance. `failed`, `cancelled`, or `ambiguous` receipts are not automatically replayed; inspect the chat and receipt before intentionally starting new work. Each new cron execution has a distinct delivery ID.
 
+### Telling the agent instead of you (`wake_origin`)
+
+`deliver` and `wake_origin` answer different questions. `deliver` posts a **message a human
+reads**. `wake_origin` hands the same text to the **agent in the conversation the job was created
+in**, as a turn — the way a Kanban task notice already arrives — so the agent sees the output and
+decides whether anything needs doing.
+
+```bash
+hermes cron edit <job-id> --deliver local --wake-origin
+hermes cron edit <job-id> --no-wake-origin          # turn it back off
+hermes cron create --schedule "15m" --script watchdog.sh --no-agent \
+    --deliver local --wake-origin
+```
+
+`--deliver local --wake-origin` is the "tell the agent, not me" combination: the output is saved
+under `~/.hermes/cron/output/` and injected into the origin session, and nothing is posted to your
+chat. The two are orthogonal, so `--deliver telegram --wake-origin` posts the message *and* wakes
+the agent; the wake fires once per run, not once per delivery target, and always after the chat
+sends, so a wake failure never blocks a delivery that already left.
+
+It never fires on a silent run. Everything that already suppresses delivery — empty stdout from a
+`no_agent` script, an unchanged monitor source, `[SILENT]`, a `wakeAgent:false` response —
+suppresses the wake too, so a healthy watchdog costs nothing.
+
+It needs an origin to wake: jobs created from a messaging platform capture one, jobs created from
+the CLI do not (nothing is woken, and this is logged rather than recorded as a failure). Each wake
+costs the origin session one full agent turn, so mind the schedule frequency.
+
 ### Routing intent (`all`)
 
 `all` lets you ship one cron job to every messaging channel you have configured, without having to enumerate them by name. It is **resolved at fire time**, so a job created before you wired up Telegram will pick up Telegram on the next tick after you set `TELEGRAM_HOME_CHANNEL`.

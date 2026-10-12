@@ -2795,7 +2795,7 @@ def _record_fire_ownership_lost(job_id: str, fire_owner: Optional[str], executio
 def _classify_delivery_outcome(
     *, delivery_error, should_deliver: bool, unresolved_origin: bool,
     normalized_deliver: str, incident_acked: bool, success: bool,
-    delivery_queued=None, notification_suppressed: bool = False,
+    delivery_queued=None, notification_suppressed: bool = False, woke_origin: bool = False,
 ) -> str:
     if delivery_error:
         return "failed"
@@ -2805,6 +2805,11 @@ def _classify_delivery_outcome(
         return "suppressed"
     if should_deliver and unresolved_origin:
         return "not_configured"
+    if should_deliver and woke_origin:
+        # A wake IS a delivery: the output reached an agent that will act on it. Without this a
+        # successful `deliver: local` + `wake_origin` run records "suppressed" and a failure
+        # incident never gets marked alerted, so the ledger would under-report real notices.
+        return "delivered"
     if should_deliver and normalized_deliver != "local":
         return "delivered"
     if incident_acked and not success:
@@ -3083,6 +3088,7 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         normalized_deliver=_normalize_deliver_value(_delivery_lane_value(job, for_failure=not d.success)),
         incident_acked=d.incident_acked,
         success=d.success,
+        woke_origin=bool(job.pop("_wake_origin_delivered", False)),
     )
     if delivery_outcome in ("delivered", "not_configured") and not d.success:
         # Failure ping left the process (or had a configured target): mark the incident alerted.
@@ -3124,6 +3130,7 @@ def _deliver_crash_failure(
         delivery_error=delivery_error, should_deliver=True, unresolved_origin=unresolved_origin,
         normalized_deliver=normalized_deliver, incident_acked=False, success=False,
         delivery_queued=job.get("last_delivery_queued"),
+        woke_origin=bool(job.pop("_wake_origin_delivered", False)),
         notification_suppressed=bool(job.get("_notification_all_targets_suppressed")))
     if delivery_outcome in ("delivered", "not_configured"):
         _mark_incident_alerted(failure_incident_id)
