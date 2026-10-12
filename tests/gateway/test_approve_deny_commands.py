@@ -354,10 +354,17 @@ class TestBlockingApprovalE2E:
 
         t = threading.Thread(target=agent_thread)
         t.start()
-        t.join(timeout=1)
-        if t.is_alive():
+        # approvals.timeout=0 ends the wait on its first poll, so the thread finishes as
+        # soon as it is scheduled. The join bound is only a hang guard for the case the
+        # timeout is NOT honored; it must be generous — under a loaded parallel suite the
+        # thread can take several seconds just to reach the wait, and a tight bound turned
+        # into a false "denied" outcome rather than a real finding.
+        t.join(timeout=30)
+        hung = t.is_alive()
+        if hung:
             resolve_gateway_approval(session_key, "deny")
             t.join(timeout=5)
+        assert not hung, "approvals.timeout=0 did not end the gateway wait; it had to be denied to unblock"
 
         assert result_holder[0]["approved"] is False
         assert result_holder[0]["outcome"] == "timeout"
