@@ -326,8 +326,28 @@ def admission_display(payload):
     return card
 
 
+_WHATSAPP_IDENTITY_KEYS = ('chat_id', 'user_id', 'chat_id_alt', 'user_id_alt')
+
+
 def _route_identity(source):
-    return {key: value for key, value in source.to_dict().items() if key != 'message_id'}
+    """Routing/provenance identity of a source, minus the platform reply anchor.
+
+    WhatsApp surfaces one human as either a phone JID (``6012@s.whatsapp.net``) or a LID
+    (``999@lid``) and the bridge is free to pick a different spelling per message: the
+    session-store origin a completion is rebuilt from kept the LID in ``user_id`` while the
+    committed human envelope carried the phone JID. Both key the same route (the session key
+    is built from ``canonical_whatsapp_identifier``), so the identity compares the canonical
+    form — a raw compare refused every async-delegation/watch completion on a WhatsApp DM with
+    ``admission_conflict`` and the delivery loop retried it every 2 s until the gateway cycled.
+    """
+    identity = {key: value for key, value in source.to_dict().items() if key != 'message_id'}
+    if source.platform == Platform.WHATSAPP:
+        from gateway.whatsapp_identity import canonical_whatsapp_identifier
+        for key in _WHATSAPP_IDENTITY_KEYS:
+            value = identity.get(key)
+            if isinstance(value, str) and value:
+                identity[key] = canonical_whatsapp_identifier(value) or value
+    return identity
 
 
 def committed_route_envelope(authority, entry):
