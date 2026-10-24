@@ -12,6 +12,7 @@ call time; sibling-defined names are imported from their defining module.
 """
 
 from dataclasses import dataclass
+import contextvars
 import hashlib
 import importlib
 import logging
@@ -1273,6 +1274,26 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
 
 # --- Combined pre-exec guard (floors + dangerous command detection) ------------------------------------------------
 
+# The agent's own one-sentence aim for the command it is about to run (Max, 2026-10-24:
+# every approval prompt must say what the command is for, not only why it was flagged).
+# Set by the terminal tool from its ``purpose`` argument; rendered first in the card's reason.
+_command_purpose: contextvars.ContextVar[str] = contextvars.ContextVar("command_purpose", default="")
+
+
+def set_command_purpose(purpose: str | None):
+    return _command_purpose.set(str(purpose or "").strip())
+
+
+def reset_command_purpose(token) -> None:
+    _command_purpose.reset(token)
+
+
+def with_purpose(description: str) -> str:
+    """``Aim: <purpose>. Flagged: <description>`` when a purpose was given, else the description."""
+    aim = _command_purpose.get()
+    return f"Aim: {aim.rstrip('.')}. Flagged: {description}" if aim else description
+
+
 def check_all_command_guards(command: str, env_type: str,
                              approval_callback=None,
                              has_host_access: bool = False) -> dict:
@@ -1314,6 +1335,7 @@ def check_all_command_guards(command: str, env_type: str,
     if pending is None:
         return _approved_with_provenance(findings, scopes)
     keys, description = pending
+    description = with_purpose(description)
     # One combined prompt; a session/always answer persists every key in it.
     return _human_decision(
         _COMMAND_GATE, command=command, description=description,
