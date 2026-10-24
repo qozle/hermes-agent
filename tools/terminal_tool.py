@@ -1448,6 +1448,7 @@ def terminal_tool(
     _host_local: bool = False,
     _completion_output_chars: int = 0,
     heartbeat: int = 0,
+    purpose: Optional[str] = None,
     persist_on_release: bool = False,
 ) -> str:
     """Execute *command* in the configured terminal environment; returns a JSON string.
@@ -1525,7 +1526,12 @@ def terminal_tool(
             ))
         # Pre-exec security checks (floors + dangerous command detection);
         # force=True means the user already confirmed.
-        verdict = _run_approval_guards(command, env_type, plan.config, force=force)
+        from tools import approval as _approval_mod
+        _purpose_token = _approval_mod.set_command_purpose(purpose)
+        try:
+            verdict = _run_approval_guards(command, env_type, plan.config, force=force)
+        finally:
+            _approval_mod.reset_command_purpose(_purpose_token)
 
         pty_disabled = pty and _command_requires_pipe_stdin(command)
         if plan.promoted_from_foreground_timeout is not None:
@@ -1586,6 +1592,10 @@ TERMINAL_SCHEMA = {
             "command": {
                 "type": "string",
                 "description": "The shell command to execute"
+            },
+            "purpose": {
+                "type": "string",
+                "description": "REQUIRED whenever the command could need the user's approval (sudo, rm, restarts, writes outside the workspace, anything destructive or privileged): one or two plain sentences saying what the command is for and what it will change, as the user would read it (e.g. 'Remove two old snap revisions to free about 2.5 GB on the root disk; nothing running uses them'). Shown on the approval prompt above the flag reason. Harmless for read-only commands."
             },
             "background": {
                 "type": "boolean",
@@ -1707,6 +1717,7 @@ def _handle_terminal(args, **kw):
         watch_patterns=watch_patterns,
         heartbeat=heartbeat,
         persist_on_release=persist_on_release,
+        purpose=args.get("purpose"),
     )
 
 

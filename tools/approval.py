@@ -12,6 +12,7 @@ call time; sibling-defined names are imported from their defining module.
 """
 
 from dataclasses import dataclass
+import contextvars
 import hashlib
 import importlib
 import logging
@@ -1148,6 +1149,26 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
 
 # --- Combined pre-exec guard (floors + dangerous command detection) ------------------------------------------------
 
+# The agent's own one-sentence aim for the command it is about to run (Max, 2026-10-24:
+# every approval prompt must say what the command is for, not only why it was flagged).
+# Set by the terminal tool from its ``purpose`` argument; rendered first in the card's reason.
+_command_purpose: contextvars.ContextVar[str] = contextvars.ContextVar("command_purpose", default="")
+
+
+def set_command_purpose(purpose: str | None):
+    return _command_purpose.set(str(purpose or "").strip())
+
+
+def reset_command_purpose(token) -> None:
+    _command_purpose.reset(token)
+
+
+def with_purpose(description: str) -> str:
+    """``Aim: <purpose>. Flagged: <description>`` when a purpose was given, else the description."""
+    aim = _command_purpose.get()
+    return f"Aim: {aim.rstrip('.')}. Flagged: {description}" if aim else description
+
+
 def check_all_command_guards(command: str, env_type: str,
                              approval_callback=None,
                              has_host_access: bool = False) -> dict:
@@ -1186,6 +1207,7 @@ def check_all_command_guards(command: str, env_type: str,
     session_key = get_current_session_key()
     if not is_dangerous or is_approved(session_key, pattern_key):
         return _approved()
+    description = with_purpose(description)
     return _human_decision(
         _COMMAND_GATE, command=command, description=description,
         pattern_key=pattern_key, pattern_keys=[pattern_key],
