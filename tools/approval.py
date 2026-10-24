@@ -1251,7 +1251,7 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     or ``approvals.cron_mode`` to require approval). See #30882.
     """
     pattern_key = "execute_code"
-    description = _EXECUTE_CODE_DESCRIPTION
+    description = with_purpose(_EXECUTE_CODE_DESCRIPTION)
 
     # Isolated backends already sandbox the child. vercel_sandbox has no host-bind concept so it stays always-skipped.
     if env_type == "vercel_sandbox":

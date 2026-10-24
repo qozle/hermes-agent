@@ -706,6 +706,7 @@ def execute_code(
     task_id: Optional[str] = None,
     enabled_tools: Optional[list[str]] = None,
     reset: bool = False,
+    purpose: Optional[str] = None,
 ) -> str:
     """Run Python in the session's persistent kernel (local) or on the remote terminal backend,
     with RPC access to a subset of Hermes tools; returns the JSON result string. "Sandbox" means
@@ -771,7 +772,12 @@ def execute_code(
     # the session context. A Docker sandbox with host bind mounts gets no container fast-path.
     # See #30882.
     from tools.approval import check_execute_code_guard
-    _guard = check_execute_code_guard(code, env_type, has_host_access=_docker_has_host_access(_env_config))
+    from tools import approval as _approval_mod
+    _purpose_token = _approval_mod.set_command_purpose(purpose)
+    try:
+        _guard = check_execute_code_guard(code, env_type, has_host_access=_docker_has_host_access(_env_config))
+    finally:
+        _approval_mod.reset_command_purpose(_purpose_token)
     if not _guard.get("approved", False):
         return _error_result(_guard.get("message") or "execute_code blocked by approval guard.",
                              user_summary=_guard.get("user_summary"))
@@ -936,6 +942,13 @@ def build_execute_code_schema(enabled_sandbox_tools: set | None = None,
                     "and print your final result to stdout.")},
                 "reset": {"type": "boolean", "description": (
                     "Discard the kernel's persistent state and start fresh before running this code.")},
+                "purpose": {"type": "string", "description": (
+                    "REQUIRED whenever the script could need the user's approval (gateway/messaging "
+                    "sessions prompt on every execute_code script; also sudo, rm, restarts, writes outside "
+                    "the workspace, database edits): one or two plain sentences saying what the script is "
+                    "for and what it will change, as the user would read it (e.g. 'Reorder the open kanban "
+                    "cards so the small fixes run before the big builds'). Shown on the approval prompt as "
+                    "'Aim: …' above the flag reason.")},
             },
             "required": ["code"],
         },
@@ -959,7 +972,8 @@ def _execute_code_handler(args: dict, **kwargs) -> str:
         return tool_error(f"execute_code received a {type(code).__name__} in 'code', but it "
                           "requires Python source as a string. Retry as execute_code(code=\"...\").")
     return execute_code(code=code or "", task_id=kwargs.get("task_id"),
-                        enabled_tools=kwargs.get("enabled_tools"), reset=bool(args.get("reset", False)))
+                        enabled_tools=kwargs.get("enabled_tools"), reset=bool(args.get("reset", False)),
+                        purpose=args.get("purpose"))
 
 
 registry.register(
