@@ -676,6 +676,17 @@ class _KanbanNotification:
         """Send one text ping; raises on adapter exception or SendResult(success=False)."""
         from gateway.warning_notifications import present_notification
         sub, adapter = self.sub, self.adapter
+        # Card t_325f9028: a `done` card and a `needs_input` block belong in
+        # Max's dashboard notification centre, not in his chat. claim() posts
+        # them there and returns True so we skip the platform ping; it returns
+        # False for every other event kind, for an unconfigured centre, AND for
+        # a post that failed -- so an outage degrades to the old ping instead
+        # of losing the notification. Blocking urllib, hence the thread.
+        from gateway.kanban_notification_centre import claim as _centre_claim
+        if await asyncio.to_thread(_centre_claim, ev, self.task, self.task_id):
+            logger.debug("kanban notifier: %s event for %s went to the notification centre; "
+                         "skipping the %s ping", ev.kind, self.task_id, self.platform_str)
+            return True
         delivery_metadata = sub.get("delivery_metadata")
         metadata: dict[str, Any] = dict(delivery_metadata) if isinstance(delivery_metadata, dict) else {}
         if sub.get("thread_id") and not metadata.get("thread_id"):
