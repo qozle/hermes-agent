@@ -191,6 +191,8 @@ class _KanbanDispatcher:
         # the same (see run_dispatcher_loop).
         kbd = _kbd()
         kwargs["max_in_progress"] = kbd.resolve_max_in_progress(kbd.configured_max_in_progress())
+        # LOCAL COMMIT (frankentrait): per-lane caps (one runner + one reviewer), same per-tick read.
+        kwargs["max_in_progress_per_lane"] = kbd.configured_max_in_progress_per_lane()
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).

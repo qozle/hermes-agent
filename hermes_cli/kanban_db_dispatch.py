@@ -135,6 +135,10 @@ class DispatchResult:
     """``(task_id, assignee, current_running_count)`` deferred because the
     assignee is at ``kanban.max_in_progress_per_profile``. Picked up on a later
     tick; separate bucket so dashboards show "profile busy" vs "stuck"."""
+    skipped_per_lane_capped: list[tuple[str, str, int]] = field(default_factory=list)
+    """LOCAL COMMIT (frankentrait): ``(task_id, lane, current_running_count)``
+    deferred because the lane (``ready`` = implementation, ``review`` =
+    reviewer) is at ``kanban.max_in_progress_per_lane.<lane>``."""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
@@ -1922,6 +1926,50 @@ def resolve_max_in_progress(configured: Optional[int]) -> Optional[int]:
     return derive_default_max_in_progress()
 
 
+# LOCAL COMMIT (frankentrait): per-lane concurrency caps. Max's rule: at most
+# one implementation worker (ready lane) and one reviewer (review lane) live at
+# a time — never two of the same. ``max_in_progress`` alone cannot express
+# that (2 could be two runners), and ``max_in_progress_per_profile`` cannot
+# either (two different sonnet tiers are still two runners).
+LANES = ("ready", "review")
+
+
+def configured_max_in_progress_per_lane() -> dict[str, int]:
+    """``kanban.max_in_progress_per_lane`` as ``{lane: cap}`` (positive ints
+    only; unset/invalid lanes are uncapped). Read per tick so an edit bites
+    within one tick, like ``max_in_progress``."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        raw = (load_config_readonly() or {}).get("kanban", {}).get("max_in_progress_per_lane")
+    except Exception:
+        return {}
+    return parse_max_in_progress_per_lane(raw)
+
+
+def parse_max_in_progress_per_lane(raw: Any) -> dict[str, int]:
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, int] = {}
+    for lane in LANES:
+        cap = _positive_int(raw.get(lane), 0)
+        if cap > 0:
+            out[lane] = cap
+    return out
+
+
+def count_running_tasks_by_lane(conn: sqlite3.Connection) -> dict[str, int]:
+    """``{lane: n}`` of ``running`` tasks on this board, lane = what the run
+    would retry as (``review`` when its claim came from the review column)."""
+    counts = {lane: 0 for lane in LANES}
+    try:
+        for row in conn.execute("SELECT id FROM tasks WHERE status = 'running'"):
+            lane = _kb._retry_status_for_run(conn, row["id"])
+            counts[lane if lane in counts else "ready"] += 1
+    except Exception:
+        pass
+    return counts
+
+
 def configured_max_in_progress() -> Optional[int]:
     """Read ``kanban.max_in_progress`` from config, or None when unset/invalid.
 
@@ -2029,6 +2077,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    max_in_progress_per_lane: Optional[Mapping[str, Any]] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2052,6 +2101,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
+            max_in_progress_per_lane=max_in_progress_per_lane,
         )
 
     try:
@@ -2414,6 +2464,7 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    max_in_progress_per_lane: Optional[Mapping[str, Any]] = None,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
@@ -2465,6 +2516,21 @@ def _dispatch_once_locked(
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
     ):
         ready_budget = max(spawn_budget - 1, 0)
+    # LOCAL COMMIT (frankentrait): hard per-lane caps. Each lane's budget is
+    # cap minus what is already running in that lane; a capped lane records
+    # its rows in skipped_per_lane_capped and spends no shared budget.
+    lane_caps = parse_max_in_progress_per_lane(max_in_progress_per_lane)
+    lane_budget: dict[str, Optional[int]] = {lane: None for lane in LANES}
+    if lane_caps:
+        running_by_lane = count_running_tasks_by_lane(conn)
+        for lane, cap in lane_caps.items():
+            lane_budget[lane] = max(cap - running_by_lane.get(lane, 0), 0)
+            if lane_budget[lane] == 0:
+                rows = ready_rows if lane == "ready" else review_rows
+                for row in rows:
+                    result.skipped_per_lane_capped.append(
+                        (row["id"], lane, running_by_lane.get(lane, 0)))
+    lane_spawned: dict[str, int] = {lane: 0 for lane in LANES}
     lane_kwargs: dict[str, Any] = dict(
         dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
@@ -2474,6 +2540,8 @@ def _dispatch_once_locked(
     spawned = 0
     for row in ready_rows:
         if ready_budget is not None and spawned >= ready_budget:
+            break
+        if lane_budget["ready"] is not None and lane_spawned["ready"] >= lane_budget["ready"]:
             break
         row_assignee = row["assignee"]
         if not row_assignee:
@@ -2488,6 +2556,7 @@ def _dispatch_once_locked(
             result.auto_assigned_default.append(row["id"])
         if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
             spawned += 1
+            lane_spawned["ready"] += 1
 
     # A review agent (sdlc-review) approves (→ done) or requests changes
     # (→ ready/todo). Review spawns share max_spawn with ready tasks. The loop
@@ -2496,11 +2565,14 @@ def _dispatch_once_locked(
     for row in review_rows:
         if spawn_budget is not None and spawned >= spawn_budget:
             break
+        if lane_budget["review"] is not None and lane_spawned["review"] >= lane_budget["review"]:
+            break
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
             continue
         if _dispatch_lane_task(conn, row, row["assignee"], result, lane="review", **lane_kwargs):
             spawned += 1
+            lane_spawned["review"] += 1
     return result
 
 

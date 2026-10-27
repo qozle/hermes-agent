@@ -1944,6 +1944,9 @@ DEFAULT_CONFIG = {
         # fan-out workflows that would otherwise saturate one profile's local model / API quota / browser
         # pool while leaving other profiles idle. See #21582.
         "max_in_progress_per_profile": None,
+        # LOCAL COMMIT (frankentrait): per-lane caps, e.g. {ready: 1, review: 1} = at most one
+        # implementation worker and one reviewer live at once. None = no per-lane cap.
+        "max_in_progress_per_lane": None,
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names
         # this home's dispatcher may claim (list or comma-separated string). None = any existing
         # profile is claimable. Set = fail-closed (an empty list claims nothing). Every home has a
