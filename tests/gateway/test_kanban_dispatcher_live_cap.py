@@ -45,6 +45,10 @@ def test_tick_passes_the_currently_configured_cap_not_the_startup_snapshot(monke
             return configured
 
         @staticmethod
+        def configured_max_in_progress_per_lane():
+            return {"ready": 1, "review": 1}  # per-lane caps are re-read the same way
+
+        @staticmethod
         def dispatch_once(conn, board=None, **kwargs):
             seen.update(kwargs)
             return "ok"
@@ -56,3 +60,4 @@ def test_tick_passes_the_currently_configured_cap_not_the_startup_snapshot(monke
     assert d.settings.max_in_progress == 1  # startup snapshot is stale on purpose
     assert d.tick_once_for_board("default") == "ok"
     assert seen["max_in_progress"] == 2
+    assert seen["max_in_progress_per_lane"] == {"ready": 1, "review": 1}
