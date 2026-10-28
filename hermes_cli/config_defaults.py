@@ -1695,6 +1695,11 @@ DEFAULT_CONFIG = {
         "cron_mode": "deny",
         "single_query_mode": "deny",
         "unattended_mode": "deny",
+        # LOCAL COMMIT (frankentrait): kanban_mode — what a dispatched kanban worker does with a
+        # flagged command. "deny" = upstream behaviour (single_query_mode); "coordinator" = post an
+        # approval_requested event on its card, heartbeat, and wait up to `timeout` for the
+        # coordinator session's `hermes kanban approve|deny <task> <token>`. No answer = denied.
+        "kanban_mode": "deny",
         # Extra rules appended to the smart-approval guardian's SYSTEM prompt, e.g. "Always ESCALATE
         # commands touching /etc".
         "smart_policy": "",
@@ -1955,6 +1960,10 @@ DEFAULT_CONFIG = {
         "review_fix_cards": False,
         "review_max_rounds": 4,
         "review_fix_assignee": "",
+        # LOCAL COMMIT (frankentrait): subscription applied to every card created from the CLI
+        # (no session to auto-subscribe): {platform, chat_id, chat_type, user_id, user_id_alt,
+        # thread_id, notifier_profile, delivery_mode}. None = CLI-created cards ping nobody.
+        "default_notify": None,
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names
         # this home's dispatcher may claim (list or comma-separated string). None = any existing
         # profile is claimable. Set = fail-closed (an empty list claims nothing). Every home has a

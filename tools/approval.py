@@ -966,6 +966,27 @@ def _presence(approval_callback=None) -> tuple:
     return approval_callback, is_cli, is_gateway, is_ask
 
 
+def _coordinator_relay(command: str, description: str, pattern_key: str) -> Optional[dict]:
+    """LOCAL COMMIT (frankentrait): a kanban worker asks the coordinator session
+    (``approvals.kanban_mode: coordinator``) instead of resolving from
+    ``single_query_mode``; None when the relay is not active."""
+    from tools import approval_kanban as _ak
+    if not _ak.coordinator_relay_active():
+        return None
+    decision, note = _ak.coordinator_decision(
+        command=command, description=description, pattern_key=pattern_key)
+    if decision == "approve":
+        logger.warning("approval (pattern: %s): %s — approved by the coordinator%s.",
+                       pattern_key, description, f" ({note})" if note else "")
+        return _approved()
+    why = ("the coordinator denied it" + (f": {note}" if note else "")) if decision == "deny" \
+        else "the coordinator did not answer in time"
+    return _blocked(
+        f"BLOCKED: approval required ({description}); {why}. "
+        "Do not retry the same command; finish what you can and say what was left.",
+        pattern_key=pattern_key, description=description)
+
+
 def _run_approval_gate(
     *, pattern_key: str, description: str, display_target: str, approval_callback=None,
     subject: str = "", noun: str = "flagged actions",
@@ -997,6 +1018,9 @@ def _run_approval_gate(
     approval_callback, is_cli, is_gateway, is_ask = _presence(approval_callback)
     if not is_cli and not is_gateway and not is_ask:
         log_args = (autoapprove_log_prefix, pattern_key, description)
+        relayed = _coordinator_relay(display_target, description, pattern_key)
+        if relayed is not None:
+            return relayed
         # Every unattended context resolves instantly — never a pending approval nobody can answer.
         deny_messages = {
             "single_query": single_query_deny_message, "cron": cron_deny_message,
@@ -1197,6 +1221,14 @@ def check_all_command_guards(command: str, env_type: str,
     # Outside CLI/gateway/ask flows we never block on approvals: each
     # unattended context applies its configured deny/approve mode, else allow.
     if not is_cli and not is_gateway and not is_ask:
+        from tools import approval_kanban as _ak
+        if _ak.coordinator_relay_active():
+            is_dangerous, pattern_key, description = detect_dangerous_command(command)
+            if not is_dangerous or is_approved(get_current_session_key(), pattern_key):
+                return _approved()
+            relayed = _coordinator_relay(command, with_purpose(description), pattern_key)
+            if relayed is not None:
+                return relayed
         for ctx in _unattended_contexts():
             result = _unattended_deny(command, ctx)
             if result is not None:

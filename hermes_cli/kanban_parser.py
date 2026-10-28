@@ -343,6 +343,12 @@ _SPECS = [
     ], help="Move a task to 'review' (implementation done, awaiting review) — NOT a block"),
     _cmd("request-changes", [_TASK_ID, _arg("reason", nargs="+", help="Concrete changes required before re-review")],
          help="Reviewer verdict: return the active review run to its implementer"),
+    _cmd("approve", [_TASK_ID, _arg("token", help="Token from the worker's approval request"),
+                     _arg("note", nargs="*", help="Optional note shown to the worker")],
+         help="LOCAL: answer a worker's approval request (approvals.kanban_mode: coordinator)"),
+    _cmd("deny", [_TASK_ID, _arg("token", help="Token from the worker's approval request"),
+                  _arg("note", nargs="*", help="Optional note shown to the worker")],
+         help="LOCAL: refuse a worker's approval request; the worker gets the note"),
     _cmd("reopen-review", [
         _TASK_IDS,
         _reason("Optional reason/note — recorded as a comment before reopening. Quote multi-word reasons."),

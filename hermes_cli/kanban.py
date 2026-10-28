@@ -210,7 +210,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
-    "request-review", "request-changes", "reopen-review",
+    "request-review", "request-changes", "reopen-review", "approve", "deny",
     "gc",
 })
 
@@ -332,6 +332,33 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_default_notify_sub(conn, task_id: str) -> bool:
+    """LOCAL COMMIT (frankentrait): a card created from the CLI has no session to
+    auto-subscribe, so its pings and approval requests reach nobody. With
+    ``kanban.default_notify`` set ({platform, chat_id, chat_type, user_id,
+    user_id_alt, thread_id, notifier_profile, delivery_mode}) every CLI-created
+    card (outside a worker) gets that subscription. Never raises."""
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return False
+    try:
+        from hermes_cli.config import load_config_readonly
+        cfg = ((load_config_readonly() or {}).get("kanban", {}) or {}).get("default_notify") or {}
+        if not isinstance(cfg, dict) or not cfg.get("platform") or not cfg.get("chat_id"):
+            return False
+        kbn.add_notify_sub(
+            conn, task_id=task_id, platform=str(cfg["platform"]), chat_id=str(cfg["chat_id"]),
+            thread_id=cfg.get("thread_id") or None, user_id=cfg.get("user_id") or None,
+            user_id_alt=cfg.get("user_id_alt") or None, chat_type=cfg.get("chat_type") or "dm",
+            notifier_profile=cfg.get("notifier_profile") or "default",
+            delivery_mode=cfg.get("delivery_mode") or "notify+wake",
+            delivery_metadata={"chat_type": cfg.get("chat_type") or "dm"},
+        )
+        return True
+    except Exception as exc:  # pragma: no cover
+        print(f"warning: default notify subscription not applied: {exc}", file=sys.stderr)
+        return False
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
     from agent.delegation_context import is_dispatcher_owned_worker_context
 
@@ -379,6 +406,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                              if is_dispatcher_owned_worker_context() else None),
         )
         task = kb.get_task(conn, task_id)
+        _apply_default_notify_sub(conn, task_id)
     if getattr(args, "json", False):
         _print_json(_task_to_dict(task))
     else:
@@ -1072,6 +1100,30 @@ def _cmd_request_changes(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_approval_answer(args: argparse.Namespace, decision: str) -> int:
+    """LOCAL COMMIT (frankentrait): coordinator answers a worker's approval request."""
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return _err(f"kanban {decision} is coordinator-only; a worker cannot answer its own request")
+    from tools import approval_kanban as ak
+    note = " ".join(getattr(args, "note", None) or []).strip() or None
+    with kbc.connect_closing() as conn:
+        ok = ak.post_decision(conn, args.task_id, args.token, decision=decision, note=note,
+                              author=_profile_author())
+        if not ok:
+            return _err(f"no open approval request with token {args.token} on {args.task_id}")
+    print(f"{'Approved' if decision == 'approve' else 'Denied'} {args.token} on {args.task_id}"
+          + (f": {note}" if note else ""))
+    return 0
+
+
+def _cmd_approve(args: argparse.Namespace) -> int:
+    return _cmd_approval_answer(args, "approve")
+
+
+def _cmd_deny(args: argparse.Namespace) -> int:
+    return _cmd_approval_answer(args, "deny")
+
+
 def _cmd_reopen_review(args: argparse.Namespace) -> int:
     ids, rc = _require_ids(args)
     if rc:
@@ -1334,6 +1386,7 @@ _HANDLERS = {
     "complete": _cmd_complete, "edit": _cmd_edit, "block": _cmd_block,
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
+    "approve": _cmd_approve, "deny": _cmd_deny,
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
     "archive": _cmd_archive, "tail": _cmd_tail, "dispatch": _cmd_dispatch,
     "daemon": _cmd_daemon, "watch": _cmd_watch, "stats": _cmd_stats,
