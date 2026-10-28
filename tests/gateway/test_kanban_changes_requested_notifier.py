@@ -114,10 +114,13 @@ def test_changes_requested_notify_wake_is_actionable_and_exactly_routed(tmp_path
     assert wake.source.chat_id == "chat-1"
     assert wake.source.chat_type == "thread"
     assert wake.source.thread_id == "topic-7"
-    assert "implementation is not approved" in wake.text
-    assert "Inspect the existing card and its current review run" in wake.text
-    assert "do not create a duplicate task" in wake.text
-    assert wake.text.count("do not create a duplicate task") == 1
+    # LOCAL COMMIT (frankentrait): review-loop mode — the wake names the Round N
+    # fixes card instead of the old "implementation is not approved" BLOCK text.
+    assert "review requested changes" in wake.text
+    assert "Round N fixes card" in wake.text
+    assert "waits in todo" in wake.text
+    assert "do not recreate tasks" in wake.text
+    assert wake.text.count("do not recreate tasks") == 1
     assert _unseen(task_id) == []
 
     # A fresh watcher after restart cannot replay an event whose cursor advanced.
