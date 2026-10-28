@@ -44,10 +44,10 @@ def _pin_first():
 # "status" covers dashboard drag-drop and `_set_status_direct()`.
 # ``review_requested`` wakes the origin like a block but is not one;
 # the task is not archived so later review cycles keep notifying.
-TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
+TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "approval_requested")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
-_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
+_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "approval_requested")
 
 
 def diagnostic_event(ev) -> bool:
@@ -469,8 +469,24 @@ def _fmt_timed_out(ev, n) -> tuple:
 # archived / unblocked are claimed (so the cursor advances past them) but
 # intentionally silent (no formatter), and excluded from _WAKE_KINDS so they
 # never wake the creator.
+def _fmt_approval_requested(ev, n) -> tuple:
+    """LOCAL COMMIT (frankentrait): a worker's flagged command, routed to the
+    coordinator (approvals.kanban_mode: coordinator). The wake handoff carries the
+    exact answer commands so the coordinator can decide in one turn."""
+    payload = ev.payload or {}
+    token = str(payload.get("token") or "")
+    aim = str(payload.get("aim") or "")[:400]
+    command = str(payload.get("command") or "")[:600]
+    msg = t("gateway.kanban.ping.approval_requested", head=n.head, aim=aim, command=command,
+            task_id=n.task_id, token=token)
+    handoff = t("gateway.kanban.wake.approval_handoff", task_id=n.task_id, token=token,
+                aim=aim, command=command)
+    return msg, handoff, None
+
+
 _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "completed": _fmt_completed,
+    "approval_requested": _fmt_approval_requested,
     "blocked": lambda ev, n: (
         t("gateway.kanban.ping.blocked", head=n.head, reason=_clip(ev, "reason", "gateway.kanban.ping.reason_suffix", 160)),
         None, None,
