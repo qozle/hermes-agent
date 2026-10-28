@@ -926,6 +926,10 @@ def _handle_request_changes(args: dict, **kw) -> str:
         ok, detail = kb.request_changes(
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not request changes for {tid}: {detail or 'invalid review state'}")
+        if isinstance(detail, str) and detail.startswith("t_"):
+            # LOCAL COMMIT: review-loop mode opened a "Round N fixes" card; this
+            # card waits in todo and re-enters review when that card completes.
+            return _ok_landed(kb, conn, tid, "todo", fix_task=detail)
         return _ok_landed(kb, conn, tid, "ready", implementer=detail)
 
 
