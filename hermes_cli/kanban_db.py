@@ -3408,15 +3408,109 @@ def _nonblank_str(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value.strip() else None
 
 
+def _review_fix_cards_config() -> tuple[bool, int, Optional[str]]:
+    """LOCAL COMMIT (frankentrait): ``kanban.review_fix_cards`` (bool),
+    ``kanban.review_max_rounds`` (int, default 4) and
+    ``kanban.review_fix_assignee`` (tier for a fix card whose review has no
+    implementer run; falls back to ``kanban.default_assignee``)."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        kan = (load_config_readonly() or {}).get("kanban", {}) or {}
+    except Exception:
+        return False, 4, None
+    enabled = bool(kan.get("review_fix_cards", False))
+    try:
+        max_rounds = max(1, int(kan.get("review_max_rounds") or 4))
+    except (TypeError, ValueError):
+        max_rounds = 4
+    fallback = _nonblank_str(kan.get("review_fix_assignee")) or _nonblank_str(kan.get("default_assignee"))
+    return enabled, max_rounds, fallback
+
+
+def _review_round_number(conn: sqlite3.Connection, task_id: str) -> int:
+    """1 + the number of ``changes_requested`` events already on the task."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM task_events WHERE task_id = ? AND kind = 'changes_requested'",
+        (task_id,),
+    ).fetchone()
+    return int(row["n"] or 0) + 1
+
+
+def _fix_card_body(review_title: str, review_id: str, round_no: int, reason: str) -> str:
+    return (
+        f"Round {round_no} of the review of: {review_title}\n\n"
+        f"The reviewer asked for these changes. Make them on the same PR branch, "
+        f"run the test files that cover what you edited, push, and finish with "
+        f"kanban_complete (do not request review — the review card {review_id} "
+        f"re-reviews on its own once this card is done).\n\n"
+        f"Changes requested:\n{reason}\n"
+    )
+
+
+def _open_review_fix_card(
+    conn: sqlite3.Connection, task_id: str, *, round_no: int, reason: str,
+    implementer: Optional[str], fallback_assignee: Optional[str],
+) -> str:
+    """Create the round-N fix card for a review card and gate the review card on
+    it. Caller holds the write txn (create_task nests under it)."""
+    parent = get_task(conn, task_id)
+    assert parent is not None  # caller validated the row under the same txn
+    assignee = implementer or fallback_assignee or None
+    workspace_kind = parent.workspace_kind if parent.workspace_kind in ("dir", "worktree") else None
+    workspace_path = parent.workspace_path if workspace_kind else None
+    branch_name = parent.branch_name if workspace_kind == "worktree" else None
+    child_id = create_task(
+        conn,
+        title=f"Round {round_no} fixes: {parent.title}"[:200],
+        body=_fix_card_body(parent.title, task_id, round_no, reason),
+        assignee=assignee,
+        created_by="review-loop",
+        workspace_kind=workspace_kind,
+        workspace_path=(
+            workspace_path.replace(task_id, "__CHILD__") if workspace_path and task_id in workspace_path
+            else workspace_path
+        ),
+        branch_name=branch_name,
+        priority=parent.priority,
+        skills=parent.skills,
+        tenant=parent.tenant,
+        creator_task_id=task_id,
+        initial_status="running",
+    )
+    if workspace_path and task_id in workspace_path:
+        conn.execute(
+            "UPDATE tasks SET workspace_path = ? WHERE id = ?",
+            (workspace_path.replace(task_id, child_id), child_id),
+        )
+    # The fix card is the review card's parent: the review card waits in todo
+    # and comes back to the review lane when the fix card completes.
+    _link(conn, child_id, task_id)
+    _append_event(conn, task_id, "linked", {"parent": child_id, "child": task_id})
+    _inherit_notify_subs(conn, child_id, (task_id,))
+    return child_id
+
+
 def request_changes(
     conn: sqlite3.Connection, task_id: str, *, reason: str, expected_run_id: Optional[int] = None,
 ) -> tuple[bool, Optional[str]]:
     """Close an active reviewer run (claimed from ``review``) and hand the task
     back to the implementer from the latest ``review_requested`` event, parent
-    gating reapplied. Returns ``(ok, implementer | reason)``."""
+    gating reapplied. Returns ``(ok, implementer | reason)``.
+
+    LOCAL COMMIT (frankentrait): with ``kanban.review_fix_cards`` on, the
+    changes become a new "Round N fixes" card instead; the review card drops to
+    ``todo`` gated on it and returns to ``review`` when the fix card completes.
+    A review card with no implementer run (a review-only card for a foreground
+    PR) is handled the same way, the fix card going to
+    ``kanban.review_fix_assignee`` / ``default_assignee``. After
+    ``kanban.review_max_rounds`` rounds the card blocks ``needs_input`` naming
+    every round. Returns ``(True, <fix card id>)`` in that mode.
+    """
     reason = str(redact_review_value(reason or "")).strip()
     if not reason:
         return False, "reason is required"
+    loop_mode, max_rounds, fallback_assignee = _review_fix_cards_config()
+    over_limit: Optional[tuple[int, int]] = None
 
     with write_txn(conn):
         task_row = conn.execute(
@@ -3439,10 +3533,72 @@ def request_changes(
         if requested_event is None:
             return False, "no prior review_requested event"
         implementer = _nonblank_str(_json_dict(requested_event["payload"]).get("implementer"))
-        if implementer is None:
+        if implementer is None and not loop_mode:
             return False, "review handoff has no valid implementer provenance"
         reviewer = _canonical_assignee(_nonblank_str(task_row["assignee"]))
 
+        if loop_mode:
+            round_no = _review_round_number(conn, task_id)
+            if round_no > max_rounds:
+                over_limit = (round_no, max_rounds)
+            else:
+                child_id = _open_review_fix_card(
+                    conn, task_id, round_no=round_no, reason=reason,
+                    implementer=implementer, fallback_assignee=fallback_assignee,
+                )
+                cur = conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status = 'todo',
+                           claim_lock = NULL,
+                           claim_expires = NULL,
+                           worker_pid = NULL, worker_started_at = NULL
+                     WHERE id = ? AND status = 'running' AND current_run_id = ?
+                    """,
+                    (task_id, int(current_run_id)),
+                )
+                if cur.rowcount != 1:
+                    return False, "task changed during review handoff"
+                run_id = _end_run(
+                    conn, task_id, outcome="changes_requested", status="todo", summary=reason,
+                )
+                _append_event(
+                    conn, task_id, "changes_requested",
+                    {
+                        "reason": reason,
+                        "implementer": implementer,
+                        "reviewer": reviewer,
+                        "status": "todo",
+                        "resume_status": "review",
+                        "round": round_no,
+                        "fix_task": child_id,
+                    },
+                    run_id=run_id,
+                )
+                return True, child_id
+
+    if over_limit is not None:
+        round_no, limit = over_limit
+        rounds = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'changes_requested' "
+            "ORDER BY id", (task_id,),
+        ).fetchall()
+        lines = [
+            f"Round {i}: {_first_line(_json_dict(r['payload']).get('reason') or '', 300)}"
+            for i, r in enumerate(rounds, 1)
+        ]
+        lines.append(f"Round {round_no}: {_first_line(reason, 300)}")
+        block_reason = (
+            f"Review loop stopped after {limit} rounds of requested changes; Max decides. "
+            + " | ".join(lines)
+        )
+        ok = block_task(
+            conn, task_id, reason=block_reason, kind="needs_input",
+            expected_run_id=int(current_run_id),
+        )
+        return (True, None) if ok else (False, "could not block after the round limit")
+
+    with write_txn(conn):
         new_status = _landing_status_after_parents(conn, task_id)
         # consecutive_failures deliberately PRESERVED: a review transition is
         # not evidence the pathology cleared; only complete_task resets it.

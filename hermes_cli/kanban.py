@@ -1063,7 +1063,12 @@ def _cmd_request_changes(args: argparse.Namespace) -> int:
         ok, detail = kb.request_changes(conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid))
         if not ok:
             return _err(f"cannot request changes for {tid}: {detail or 'invalid review state'}")
-        print(f"Requested changes for {tid}" + (f"; routed to {detail}" if detail else ""))
+        if isinstance(detail, str) and detail.startswith("t_"):
+            print(f"Requested changes for {tid}; fix card {detail} opened, {tid} waits in todo until it is done")
+        elif detail:
+            print(f"Requested changes for {tid}; routed to {detail}")
+        else:
+            print(f"Requested changes for {tid}; round limit reached, card blocked for Max")
     return 0
 
 

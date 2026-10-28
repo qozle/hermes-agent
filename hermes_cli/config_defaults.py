@@ -1947,6 +1947,14 @@ DEFAULT_CONFIG = {
         # LOCAL COMMIT (frankentrait): per-lane caps, e.g. {ready: 1, review: 1} = at most one
         # implementation worker and one reviewer live at once. None = no per-lane cap.
         "max_in_progress_per_lane": None,
+        # LOCAL COMMIT (frankentrait): a reviewer's "changes requested" opens a "Round N fixes"
+        # card and the review card waits in todo on it (back to review when it completes);
+        # after review_max_rounds rounds the review card blocks needs_input for Max.
+        # review_fix_assignee = tier for a fix card whose review has no implementer run
+        # (a review-only card for a foreground PR); "" = kanban.default_assignee.
+        "review_fix_cards": False,
+        "review_max_rounds": 4,
+        "review_fix_assignee": "",
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names
         # this home's dispatcher may claim (list or comma-separated string). None = any existing
         # profile is claimable. Set = fail-closed (an empty list claims nothing). Every home has a
