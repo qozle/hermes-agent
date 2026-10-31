@@ -135,6 +135,41 @@ def test_review_only_card_uses_the_fallback_assignee(kanban_home, monkeypatch):
         assert kb.get_task(conn, tid).status == "todo"
 
 
+def test_policy_is_read_from_the_board_owner_not_the_worker_profile(kanban_home, monkeypatch):
+    """A dispatched reviewer runs with HERMES_HOME rewritten to its tier profile,
+    whose config.yaml carries no board policy. The loop switch, round cap and
+    fix assignee come from the config next to kanban.db — or the reviewer of a
+    foreground PR is refused ``no valid implementer provenance`` with the loop
+    on in the fleet config (t_a901b125, 2026-10-31)."""
+    (kanban_home / "config.yaml").write_text(
+        "kanban:\n  review_fix_cards: true\n  review_max_rounds: 3\n  review_fix_assignee: opus-high\n",
+        encoding="utf-8",
+    )
+    profile = kanban_home / "profiles" / "opus-x"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("model:\n  default: claude-opus-5\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    # the board stays the fleet's while the active config is the profile's
+    assert kb.kanban_home() == kanban_home
+    from hermes_cli.config import get_config_path
+    assert get_config_path() == profile / "config.yaml"
+    assert kb._review_fix_cards_config() == (True, 3, "opus-high")
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="Review PR #13", assignee="opus-x")
+        assert kb.request_review(conn, tid, summary="foreground PR", reviewer="opus-x")
+        review = kb.claim_review_task(conn, tid)
+        assert review is not None
+        ok, child = kb.request_changes(
+            conn, tid, reason="two one-line string fixes", expected_run_id=review.current_run_id,
+        )
+        assert ok and child.startswith("t_"), child
+        assert kb.get_task(conn, child).assignee == "opus-high"
+        assert kb.get_task(conn, tid).status == "todo"
+    # no board config next to kanban.db: the active config decides, as before
+    (kanban_home / "config.yaml").unlink()
+    assert kb._review_fix_cards_config()[0] is False
+
+
 def test_round_limit_blocks_the_review_card_for_max(kanban_home, monkeypatch):
     _cfg(monkeypatch, review_fix_cards=True, review_max_rounds=2)
     with kbc.connect() as conn:
