@@ -353,6 +353,23 @@ class TestBuildSkillsSystemPrompt:
 
 
 class TestBuildContextFilesPrompt:
+    def test_deleted_working_directory_skips_project_context_instead_of_raising(self, tmp_path, monkeypatch, caplog):
+        """LOCAL COMMIT (frankentrait): a kanban reviewer removed its own card worktree after the
+        merge, then the post-compaction prompt rebuild called ``os.getcwd()`` on the vanished
+        directory and the whole worker died (FileNotFoundError → exit 1 → a ``crashed`` run and a
+        cold retry of a finished card; t_a901b125, 2026-10-31). No cwd = no project context, no
+        crash; SOUL.md still loads."""
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        with pytest.raises(FileNotFoundError):
+            os.getcwd()
+        with caplog.at_level(logging.WARNING, logger="agent.prompt_builder"):
+            assert build_context_files_prompt(skip_soul=True) == ""
+        assert "working directory unavailable" in caplog.text
+        monkeypatch.chdir(tmp_path)
+
     def test_empty_dir_loads_seeded_global_soul(self, tmp_path):
         from unittest.mock import patch
 
