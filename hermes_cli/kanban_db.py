@@ -408,6 +408,38 @@ def kanban_home() -> Path:
     return get_default_hermes_root()
 
 
+def board_kanban_config() -> dict:
+    """The ``kanban:`` section of the BOARD OWNER's ``config.yaml``
+    (``kanban_home()/config.yaml``), else the active config's.
+
+    LOCAL COMMIT (frankentrait): a dispatched worker runs with HERMES_HOME
+    rewritten to its tier profile, so ``load_config_readonly()`` inside it reads
+    ``profiles/<tier>/config.yaml`` — a file that carries no board policy. Board
+    policy (the review loop, its round cap, its fix assignee) is set once in the
+    config next to ``kanban.db``, so every policy reader that can run inside a
+    worker goes through here. Read from the active config only when it IS the
+    board config (no profile) or the board config has no ``kanban:`` section.
+    Never raises."""
+    try:
+        from hermes_cli.config import get_config_path, load_config_readonly
+        board_cfg = kanban_home() / "config.yaml"
+        if board_cfg.is_file() and board_cfg.resolve() != get_config_path().resolve():
+            try:
+                from utils import fast_safe_load as _safe_load
+            except ImportError:  # pragma: no cover
+                import yaml
+                _safe_load = yaml.safe_load
+            with open(board_cfg, encoding="utf-8-sig") as fh:
+                data = _safe_load(fh) or {}
+            kan = data.get("kanban") if isinstance(data, dict) else None
+            if isinstance(kan, dict):
+                return kan
+        kan = (load_config_readonly() or {}).get("kanban", {})
+        return kan if isinstance(kan, dict) else {}
+    except Exception:
+        return {}
+
+
 def boards_root() -> Path:
     """``<root>/kanban/boards`` — parent of the *additional* named boards.
     ``default`` is deliberately not here (its DB stays at ``<root>/kanban.db``)."""
@@ -3412,11 +3444,12 @@ def _review_fix_cards_config() -> tuple[bool, int, Optional[str]]:
     """LOCAL COMMIT (frankentrait): ``kanban.review_fix_cards`` (bool),
     ``kanban.review_max_rounds`` (int, default 4) and
     ``kanban.review_fix_assignee`` (tier for a fix card whose review has no
-    implementer run; falls back to ``kanban.default_assignee``)."""
-    try:
-        from hermes_cli.config import load_config_readonly
-        kan = (load_config_readonly() or {}).get("kanban", {}) or {}
-    except Exception:
+    implementer run; falls back to ``kanban.default_assignee``). Read from the
+    board owner's config (``board_kanban_config``): a reviewer worker's own
+    profile config carries none of these, and reading it there switched the
+    loop off mid-review (t_a901b125, 2026-10-31)."""
+    kan = board_kanban_config()
+    if not kan:
         return False, 4, None
     enabled = bool(kan.get("review_fix_cards", False))
     try:
