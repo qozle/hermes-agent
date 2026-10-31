@@ -1763,8 +1763,19 @@ def build_context_files_prompt(
 
     if safe_worker_enabled():
         return ""
-    cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
-    if _project_context_suppressed(cwd, cwd_path, allow_install_tree_fallback):
+    try:
+        cwd_path: Optional[Path] = Path(cwd if cwd is not None else os.getcwd()).resolve()
+    except (FileNotFoundError, PermissionError) as exc:
+        # LOCAL COMMIT (frankentrait): a worker whose working directory was removed under it (a
+        # reviewer `git worktree remove`-ing its own card worktree after the merge) died here on
+        # the post-compaction prompt rebuild — exit 1, a `crashed` run and a cold retry of a card
+        # that was already finished (t_a901b125, 2026-10-31). No cwd = no project context;
+        # SOUL.md still loads.
+        logger.warning("skipping project-context discovery: working directory unavailable (%s)", exc)
+        cwd_path = None
+    if cwd_path is None:
+        sections = []
+    elif _project_context_suppressed(cwd, cwd_path, allow_install_tree_fallback):
         logger.warning(
             "skipping project-context discovery: working-directory resolution fell back to the Hermes "
             "install tree (%s) — set terminal.cwd to your project directory", cwd_path,
