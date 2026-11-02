@@ -87,6 +87,10 @@ def test_changes_open_a_fix_card_and_the_review_card_waits(kanban_home, monkeypa
         assert fx.title.startswith("Round 1 fixes: Fix the quote line")
         assert "price blanks every 20 s" in (fx.body or "")
         assert tid in (fx.body or "")
+        # Max's rule on every card a worker builds from: findings outside the
+        # requested changes are reported, never carded (an unasked test-fix card
+        # came out of a fixes worker on 2026-11-02).
+        assert "never a new card or PR" in (fx.body or "")
         ev = _events(conn, tid, "changes_requested")
         assert ev[-1]["round"] == 1 and ev[-1]["fix_task"] == child
         assert ev[-1]["resume_status"] == "review"
