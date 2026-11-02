@@ -3476,7 +3476,10 @@ def _fix_card_body(review_title: str, review_id: str, round_no: int, reason: str
         f"run the test files that cover what you edited, push, and finish with "
         f"kanban_complete (do not request review — the review card {review_id} "
         f"re-reviews on its own once this card is done).\n\n"
-        f"Changes requested:\n{reason}\n"
+        f"Changes requested:\n{reason}\n\n"
+        f"Scope: only the changes requested above. A finding outside them goes in "
+        f"your summary as one line — never a new card or PR; Max decides what gets "
+        f"built.\n"
     )
 
 
