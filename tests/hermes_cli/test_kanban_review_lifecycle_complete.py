@@ -453,6 +453,10 @@ def test_respawn_guards_compare_mixed_int_and_iso_times_by_value(conn) -> None:
         old_pr, guarded = card("old pr"), card("guarded")
         comment(old_pr, iso(90 * 86400))
         comment(guarded, now - 60)
+        # LOCAL COMMIT (frankentrait, register #9): ``active_pr`` counts only PR links posted
+        # inside one of the card's OWN runs, so the guarded card's comment sits in a run of its own.
+        conn.execute("INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) "
+                     "VALUES (?, 'dev', 'reclaimed', 'reclaimed', ?, ?)", (guarded, now - 90, now - 30))
         conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES "
                      "(?, 'assigned', '{\"assignee\": \"ops\", \"from\": \"dev\"}', ?)", (guarded, iso(7200)))
     assert kbd.check_respawn_guard(conn, old_pr) is None
