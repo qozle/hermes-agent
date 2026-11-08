@@ -1952,6 +1952,10 @@ DEFAULT_CONFIG = {
         # LOCAL COMMIT (frankentrait): per-lane caps, e.g. {ready: 1, review: 1} = at most one
         # implementation worker and one reviewer live at once. None = no per-lane cap.
         "max_in_progress_per_lane": None,
+        # LOCAL COMMIT (frankentrait): per-origin cap — N running cards per conversation that
+        # opened them (the WhatsApp chat, each terminal session), keyed by the card's notify
+        # subscription platform:chat_id. None = no per-origin cap.
+        "max_in_progress_per_origin": None,
         # LOCAL COMMIT (frankentrait): a reviewer's "changes requested" opens a "Round N fixes"
         # card and the review card waits in todo on it (back to review when it completes);
         # after review_max_rounds rounds the review card blocks needs_input for Max.

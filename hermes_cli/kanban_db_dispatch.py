@@ -139,6 +139,10 @@ class DispatchResult:
     """LOCAL COMMIT (frankentrait): ``(task_id, lane, current_running_count)``
     deferred because the lane (``ready`` = implementation, ``review`` =
     reviewer) is at ``kanban.max_in_progress_per_lane.<lane>``."""
+    skipped_per_origin_capped: list[tuple[str, str, int]] = field(default_factory=list)
+    """LOCAL COMMIT (frankentrait): ``(task_id, origin_key, current_running_count)``
+    deferred because the conversation that opened the card already has
+    ``kanban.max_in_progress_per_origin`` cards running."""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
@@ -1970,6 +1974,81 @@ def count_running_tasks_by_lane(conn: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 
+# LOCAL COMMIT (frankentrait): per-origin concurrency cap. Max's rule
+# (2026-11-08): every agent conversation may have N cards running at once —
+# the WhatsApp chat N, each terminal session N, independent of each other.
+# A card's origin is the conversation it was created from, recorded as its
+# notify subscriptions (``kanban_notify_subs``: the creating chat is subscribed
+# at create time, and review-loop children inherit the creator's rows), so
+# ``platform:chat_id`` is the stable key. A card with no subscription at all
+# (bare shell, cron) sits in one shared "no origin" bucket.
+NO_ORIGIN_KEY = ""
+
+
+def configured_max_in_progress_per_origin() -> Optional[int]:
+    """``kanban.max_in_progress_per_origin`` as a positive int, or None
+    (unset/invalid = no per-origin cap). Read per tick like the other caps."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        raw = (load_config_readonly() or {}).get("kanban", {}).get("max_in_progress_per_origin")
+    except Exception:
+        return None
+    return parse_max_in_progress_per_origin(raw)
+
+
+def parse_max_in_progress_per_origin(raw: Any) -> Optional[int]:
+    if isinstance(raw, bool):
+        return None
+    cap = _positive_int(raw, 0)
+    return cap if cap > 0 else None
+
+
+def task_origin_keys(conn: sqlite3.Connection, task_id: str) -> tuple[str, ...]:
+    """Distinct ``platform:chat_id`` keys of the conversations subscribed to a
+    task; ``(NO_ORIGIN_KEY,)`` when it has none."""
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT platform, chat_id FROM kanban_notify_subs WHERE task_id = ? "
+            "ORDER BY platform, chat_id",
+            (task_id,),
+        ).fetchall()
+    except Exception:
+        rows = []
+    keys = tuple(f"{row['platform']}:{row['chat_id']}" for row in rows if row["chat_id"])
+    return keys or (NO_ORIGIN_KEY,)
+
+
+def count_running_tasks_by_origin(conn: sqlite3.Connection) -> dict[str, int]:
+    """``{origin_key: n}`` of ``running`` tasks on this board. A task
+    subscribed to two conversations counts once against each."""
+    counts: dict[str, int] = {}
+    try:
+        for row in conn.execute("SELECT id FROM tasks WHERE status = 'running'"):
+            for key in task_origin_keys(conn, row["id"]):
+                counts[key] = counts.get(key, 0) + 1
+    except Exception:
+        pass
+    return counts
+
+
+def _origin_capped(
+    conn: sqlite3.Connection,
+    task_id: str,
+    per_origin_cap: Optional[int],
+    per_origin_running: Optional[dict[str, int]],
+) -> Optional[tuple[str, int]]:
+    """``(origin_key, running)`` for the first origin of ``task_id`` already at
+    the cap, else None (spawnable as far as the origin cap goes)."""
+    if per_origin_cap is None:
+        return None
+    running = per_origin_running or {}
+    for key in task_origin_keys(conn, task_id):
+        current = running.get(key, 0)
+        if current >= per_origin_cap:
+            return key, current
+    return None
+
+
 def configured_max_in_progress() -> Optional[int]:
     """Read ``kanban.max_in_progress`` from config, or None when unset/invalid.
 
@@ -2078,6 +2157,7 @@ def dispatch_once(
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
     max_in_progress_per_lane: Optional[Mapping[str, Any]] = None,
+    max_in_progress_per_origin: Optional[int] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2102,6 +2182,7 @@ def dispatch_once(
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
             max_in_progress_per_lane=max_in_progress_per_lane,
+            max_in_progress_per_origin=max_in_progress_per_origin,
         )
 
     try:
@@ -2151,6 +2232,8 @@ def _dispatch_lane_task(
     spawn_fn,
     per_profile_cap: Optional[int],
     per_profile_running: dict[str, int],
+    per_origin_cap: Optional[int] = None,
+    per_origin_running: Optional[dict[str, int]] = None,
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
     Returns True when a spawn slot was consumed (real or ``dry_run``); every
@@ -2185,6 +2268,12 @@ def _dispatch_lane_task(
         if current >= per_profile_cap:
             result.skipped_per_profile_capped.append((task_id, assignee, current))
             return False
+    # LOCAL COMMIT (frankentrait): per-origin cap — the conversation that
+    # opened this card already has its quota of running cards.
+    origin_hit = _origin_capped(conn, task_id, per_origin_cap, per_origin_running)
+    if origin_hit is not None:
+        result.skipped_per_origin_capped.append((task_id, origin_hit[0], origin_hit[1]))
+        return False
     guard_reason = check_respawn_guard(conn, task_id, lane=lane)
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
@@ -2205,6 +2294,9 @@ def _dispatch_lane_task(
         # ticks re-query from the DB.
         if per_profile_cap is not None and name:
             per_profile_running[name] = per_profile_running.get(name, 0) + 1
+        if per_origin_cap is not None and per_origin_running is not None:
+            for key in task_origin_keys(conn, task_id):
+                per_origin_running[key] = per_origin_running.get(key, 0) + 1
 
     if dry_run:
         result.spawned.append((task_id, assignee, ""))
@@ -2406,12 +2498,15 @@ def _any_spawnable_review(
     *,
     per_profile_cap: Optional[int] = None,
     per_profile_running: Optional[dict[str, int]] = None,
+    per_origin_cap: Optional[int] = None,
+    per_origin_running: Optional[dict[str, int]] = None,
 ) -> bool:
     """Mirror review dispatch gates before reserving ready-lane capacity.
 
     Unavailable profile metadata retains the historic fail-open behavior. A
     review row that :func:`_dispatch_lane_task` would refuse this tick — its
-    assignee already at the per-profile cap, or respawn-guarded — cannot
+    assignee already at the per-profile cap, its origin at the per-origin cap,
+    or respawn-guarded — cannot
     consume the reservation, so it must not withhold capacity from an
     otherwise ready task (one such row would pin ``ready_budget`` to 0).
     """
@@ -2426,6 +2521,8 @@ def _any_spawnable_review(
         if profile_exists is not None and not profile_exists(assignee):
             continue
         if per_profile_cap is not None and running.get(assignee, 0) >= per_profile_cap:
+            continue
+        if _origin_capped(conn, row["id"], per_origin_cap, per_origin_running) is not None:
             continue
         if check_respawn_guard(conn, row["id"], lane="review") is None:
             return True
@@ -2465,6 +2562,7 @@ def _dispatch_once_locked(
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
     max_in_progress_per_lane: Optional[Mapping[str, Any]] = None,
+    max_in_progress_per_origin: Optional[int] = None,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
@@ -2510,10 +2608,17 @@ def _dispatch_once_locked(
     # consume the ENTIRE shared budget, starving reviews under a sustained ready
     # backlog. When spawnable review work exists and there is any budget, hold
     # one slot back.
+    # LOCAL COMMIT (frankentrait): per-origin cap, counted once per tick and
+    # incremented in-tick by _count_spawn like the per-profile map.
+    per_origin_cap = parse_max_in_progress_per_origin(max_in_progress_per_origin)
+    per_origin_running: dict[str, int] = (
+        count_running_tasks_by_origin(conn) if per_origin_cap is not None else {}
+    )
     ready_budget = spawn_budget
     if spawn_budget is not None and spawn_budget > 0 and _any_spawnable_review(
         conn, review_rows,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+        per_origin_cap=per_origin_cap, per_origin_running=per_origin_running,
     ):
         ready_budget = max(spawn_budget - 1, 0)
     # LOCAL COMMIT (frankentrait): hard per-lane caps. Each lane's budget is
@@ -2535,6 +2640,7 @@ def _dispatch_once_locked(
         dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+        per_origin_cap=per_origin_cap, per_origin_running=per_origin_running,
     )
     default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0
