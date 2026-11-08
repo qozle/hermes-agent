@@ -103,7 +103,7 @@ async def test_kanban_worker_settles_a_card_whose_turn_outstreams_the_client_que
     from hermes_cli import kanban_worker_client
 
     @asynccontextmanager
-    async def connect():
+    async def connect(**_kwargs):  # LOCAL COMMIT (frankentrait): the worker client passes ping_timeout
         async with GatewayClient(CardOwner(6000)) as client:
             yield client
 

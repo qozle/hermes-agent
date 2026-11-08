@@ -21,6 +21,16 @@ OWNER_WAIT_S = 180.0
 _TRANSIENT_OWNER_STATES = frozenset({'draining', 'starting'})
 # Past the board lock wait: the owner's session setup and receipt before and after the write.
 ADMISSION_ANSWER_MARGIN_S = 60.0
+# LOCAL COMMIT (frankentrait): once the owner has admitted the run, this process is only a
+# receipt poller — but the owner's managed worker watches THIS pid and ends the attempt when it
+# dies. On 2026-11-08 two 25-minute runs were lost at once: the gateway's event loop stalled
+# past the websocket library's 20 s keepalive (host load 15), both links closed with
+# "keepalive ping timeout", the pollers exited 1 and the owner-side turns ended. So: a wider
+# keepalive window, and a dropped link after admission is reconnected and the receipt read
+# again — the owner retains the execution and the admission id is valid on any connection.
+RECEIPT_PING_TIMEOUT_S = 120.0
+RECONNECT_WINDOW_S = 600.0
+RECONNECT_PAUSE_S = 2.0
 
 
 def admission_answer_budget():
@@ -32,26 +42,58 @@ def admission_answer_budget():
     return lock_wait + ADMISSION_ANSWER_MARGIN_S
 
 
+def _link_lost(exc) -> bool:
+    """A transport failure after admission (socket closed, keepalive timeout, reconnect refused),
+    as opposed to an owner refusal (``GatewayRPCError``) that a retry would only repeat."""
+    from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError
+    return isinstance(exc, GatewayClientError) and not isinstance(exc, GatewayRPCError)
+
+
 async def run(params, board_db):
     from hermes_cli.gateway_client import connect_gateway, GatewayClientError, GatewayUnavailableError
     if os.environ.get('HERMES_TUI_GATEWAY_URL'):
         raise GatewayClientError('Kanban requires the assigned local profile owner')
     deadline = time.monotonic() + OWNER_WAIT_S
+    accepted = None          # the owner's kanban.run answer, once it has admitted the run
+    lost_since = None        # monotonic time of the first failed poll of the current outage
     while True:
         try:
-            async with connect_gateway() as client:
+            async with connect_gateway(ping_timeout=RECEIPT_PING_TIMEOUT_S) as client:
                 # kanban.run subscribes this socket to the card's session, but only receipts matter
                 # here: discard the turn's events, or they fill the client's bounded queue and its
                 # reader stops, with the next receipt behind it.
                 drain = asyncio.create_task(_discard(client.events))
                 try:
-                    return await _submit_claim(client, params, board_db)
+                    if accepted is None:
+                        accepted = await _admit(client, params, board_db)
+                    lost_since = None
+                    return await _await_receipt(client, accepted, params, board_db)
                 finally:
                     drain.cancel()
         except GatewayUnavailableError as exc:
-            if exc.state not in _TRANSIENT_OWNER_STATES or time.monotonic() >= deadline:
+            if accepted is None:
+                if exc.state not in _TRANSIENT_OWNER_STATES or time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(1)
+                continue
+            lost_since = await _pause_before_reconnect(exc, lost_since)
+        except GatewayClientError as exc:
+            if accepted is None or not _link_lost(exc):
                 raise
-            await asyncio.sleep(1)
+            lost_since = await _pause_before_reconnect(exc, lost_since)
+
+
+async def _pause_before_reconnect(exc, lost_since):
+    """Wait out one failed link to an admitted run; raise once the outage outlives the window."""
+    now = time.monotonic()
+    if lost_since is None:
+        lost_since = now
+        print(f'Kanban owner link lost after admission ({exc}); reconnecting for up to '
+              f'{int(RECONNECT_WINDOW_S)} s', file=sys.stderr, flush=True)
+    if now - lost_since >= RECONNECT_WINDOW_S:
+        raise exc
+    await asyncio.sleep(RECONNECT_PAUSE_S)
+    return lost_since
 
 
 async def _discard(events):
@@ -60,7 +102,13 @@ async def _discard(events):
 
 
 async def _submit_claim(client, params, board_db):
-    from hermes_cli.gateway_client import GatewayClientError
+    """Admit the run on ``client`` and wait for its receipt on that same link (one connection,
+    the pre-reconnect shape; ``run`` drives the two halves separately so a lost link resumes)."""
+    accepted = await _admit(client, params, board_db)
+    return await _await_receipt(client, accepted, params, board_db)
+
+
+async def _admit(client, params, board_db):
     db = str(await asyncio.to_thread(Path(board_db).resolve))
     # The owner answers only after it checks the claim and writes its ``owner_admitted`` marker
     # in one board write transaction. The board (the cross-profile dispatch bus) can make that
@@ -70,8 +118,13 @@ async def _submit_claim(client, params, board_db):
     # ``enforce_max_runtime`` and TTL reclaim skip the run (``owner_reclaim_paused``), so an owner
     # that stalls after admitting is bounded only here. A hang-up fails the wait sooner.
     accepted = await client.rpc('kanban.run', _timeout=admission_answer_budget(), **dict(params, db=db))
+    print(f"Session: {accepted['session_id']}", file=sys.stderr)
+    return accepted
+
+
+async def _await_receipt(client, accepted, params, board_db):
+    from hermes_cli.gateway_client import GatewayClientError
     sid, receipt = accepted['session_id'], accepted['receipt']
-    print(f'Session: {sid}', file=sys.stderr)
     while receipt['status'] not in {'terminal', 'unknown'}:
         await asyncio.sleep(.2)
         receipt = await client.rpc('prompt.receipt', session_id=sid, admission_id=receipt['admission_id'])

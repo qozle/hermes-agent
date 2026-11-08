@@ -16,7 +16,7 @@ from hermes_cli import gateway_client, kanban_worker_client
 
 def _owner(states, submitted):
     @asynccontextmanager
-    async def connect():
+    async def connect(**_kwargs):  # LOCAL COMMIT (frankentrait): the worker client passes ping_timeout
         state = states.pop(0) if states else None
         if state:
             # The exact refusal connect_gateway raises for a draining/starting owner.

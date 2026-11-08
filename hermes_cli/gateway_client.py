@@ -259,11 +259,14 @@ def _session_ticket(home: Path, endpoint, *, purpose="interactive", scope=None, 
 
 
 @asynccontextmanager
-async def connect_gateway(endpoint=None, subject=None):
+async def connect_gateway(endpoint=None, subject=None, *, ping_timeout=None):
     """Attach to this home's owner. ``endpoint``: an already-discovered ready owner to dial as-is
     (maintenance that must never start a gateway); default ensures one, starting it if needed.
     ``subject``: mint the ticket for this principal (the caller's authenticated dashboard user)
-    rather than the socket identity; only a peer the owner already trusts may name one."""
+    rather than the socket identity; only a peer the owner already trusts may name one.
+    ``ping_timeout``: seconds the keepalive ping may go unanswered before the socket is dropped
+    (LOCAL COMMIT frankentrait: the library default of 20 s ends a long-lived kanban worker link
+    whenever the owner's event loop stalls that long under load; the worker client raises it)."""
     from websockets.asyncio.client import connect
     from hermes_constants import get_hermes_home
     from hermes_cli.gateway_runtime import attachable, ensure_gateway_runtime, gateway_profile_home
@@ -302,7 +305,7 @@ async def connect_gateway(endpoint=None, subject=None):
         # user's HTTP(S) proxy; websockets>=14 reads HTTP_PROXY/HTTPS_PROXY by default and a proxy that
         # cannot reach 127.0.0.1 turns every launch into a 10 s open timeout.
         async with connect(url, subprotocols=protocols, open_timeout=10, max_size=8 * 1024 * 1024,
-                           proxy=None) as ws:
+                           proxy=None, **({"ping_timeout": ping_timeout} if ping_timeout is not None else {})) as ws:
             if protocols and ws.subprotocol != GATEWAY_WS_PROTOCOL:
                 raise GatewayClientError("Gateway protocol mismatch; update/restart required")
             async with GatewayClient(ws) as client:
