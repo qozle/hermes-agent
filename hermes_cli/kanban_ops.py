@@ -91,6 +91,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             max_in_progress_per_lane=kbd.configured_max_in_progress_per_lane(),
+            max_in_progress_per_origin=kbd.configured_max_in_progress_per_origin(),
         )
     if getattr(args, "json", False):
         _print_json({

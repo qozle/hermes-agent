@@ -49,6 +49,10 @@ def test_tick_passes_the_currently_configured_cap_not_the_startup_snapshot(monke
             return {"ready": 1, "review": 1}  # per-lane caps are re-read the same way
 
         @staticmethod
+        def configured_max_in_progress_per_origin():
+            return 2  # per-origin cap (N cards per conversation), re-read the same way
+
+        @staticmethod
         def dispatch_once(conn, board=None, **kwargs):
             seen.update(kwargs)
             return "ok"
@@ -61,3 +65,4 @@ def test_tick_passes_the_currently_configured_cap_not_the_startup_snapshot(monke
     assert d.tick_once_for_board("default") == "ok"
     assert seen["max_in_progress"] == 2
     assert seen["max_in_progress_per_lane"] == {"ready": 1, "review": 1}
+    assert seen["max_in_progress_per_origin"] == 2
