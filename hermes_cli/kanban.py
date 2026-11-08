@@ -332,12 +332,39 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_origin_notify_sub(conn, task_id: str) -> bool:
+    """LOCAL COMMIT (frankentrait): ``hermes kanban create`` run from inside an agent
+    conversation (the terminal tool's subprocess inherits that conversation's
+    ``HERMES_SESSION_*`` env) subscribes the creating conversation, exactly as the
+    ``kanban_create`` tool's auto-subscribe does (``tools.kanban_tools._resolve_notify_target``):
+    a card opened from a terminal chat pings that chat, one opened from WhatsApp pings
+    WhatsApp. Gated by ``kanban.auto_subscribe_on_create`` like the tool path. A bare shell
+    (no session env) returns False so ``_apply_default_notify_sub`` keeps the home-chat
+    fallback; a worker never subscribes itself (creator lineage covers child cards).
+    Never raises."""
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return False
+    try:
+        from hermes_cli.config import cfg_get, load_config_readonly
+        if not cfg_get(load_config_readonly() or {}, "kanban", "auto_subscribe_on_create", default=True):
+            return False
+        from tools.kanban_tools import _resolve_notify_target
+        target = _resolve_notify_target()
+        if not target:
+            return False
+        kbn.add_notify_sub(conn, task_id=task_id, **target)
+        return True
+    except Exception as exc:  # pragma: no cover
+        print(f"warning: origin notify subscription not applied: {exc}", file=sys.stderr)
+        return False
+
+
 def _apply_default_notify_sub(conn, task_id: str) -> bool:
-    """LOCAL COMMIT (frankentrait): a card created from the CLI has no session to
-    auto-subscribe, so its pings and approval requests reach nobody. With
-    ``kanban.default_notify`` set ({platform, chat_id, chat_type, user_id,
-    user_id_alt, thread_id, notifier_profile, delivery_mode}) every CLI-created
-    card (outside a worker) gets that subscription. Never raises."""
+    """LOCAL COMMIT (frankentrait): a card created from a bare shell has no conversation
+    to auto-subscribe (see ``_apply_origin_notify_sub``), so its pings and approval
+    requests reach nobody. With ``kanban.default_notify`` set ({platform, chat_id,
+    chat_type, user_id, user_id_alt, thread_id, notifier_profile, delivery_mode}) every
+    such card (outside a worker) gets that subscription. Never raises."""
     if os.environ.get("HERMES_KANBAN_TASK"):
         return False
     try:
@@ -406,7 +433,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                              if is_dispatcher_owned_worker_context() else None),
         )
         task = kb.get_task(conn, task_id)
-        _apply_default_notify_sub(conn, task_id)
+        _apply_origin_notify_sub(conn, task_id) or _apply_default_notify_sub(conn, task_id)
     if getattr(args, "json", False):
         _print_json(_task_to_dict(task))
     else:

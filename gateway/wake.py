@@ -118,6 +118,13 @@ async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source:
             raise ValueError("deliver_wake: push-capable adapter requires a SessionSource")
         from gateway.platforms.event import MessageEvent, MessageType
         runner = getattr(adapter, "gateway_runner", None)
+        if runner is None:
+            # LOCAL COMMIT (frankentrait): the LocalSessionAdapter fronting CLI/TUI conversations is
+            # built by session_local_recovery, not _create_adapter, so it carries no gateway_runner;
+            # without it a Kanban wake for a local route skipped admit_route_wake (whose Platform.LOCAL
+            # branch exists for exactly this) and died in handle_message ("no gateway message handler").
+            # The adapter's session authority knows the runner.
+            runner = getattr(getattr(adapter, "authority", None), "runner", None)
         if runner is not None:
             from gateway.session_automation import admit_route_wake
             from hermes_state_runtime import RuntimeStoreError
