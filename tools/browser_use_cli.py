@@ -335,6 +335,28 @@ def _find_screenshot(stdout: str, since: float) -> Optional[str]:
     return None
 
 
+def _sniffed_image_mime(path: str) -> Optional[str]:
+    """LOCAL COMMIT (frankentrait): the real image type of ``path`` from its magic bytes, or None
+    when it is not a png/jpeg/gif/webp. ``_find_screenshot`` accepts any ``.png/.jpg/.webp`` path a
+    script printed — a worker that writes a CDP ``format='webp'`` capture and prints its path got
+    that file attached as ``image/png``; Anthropic rejects the mislabelled image and every later
+    request of the run (the image stays in history), which killed a 70-minute card (2026-11-08)."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        return None
+    if head.startswith(b"\x89PNG"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"GIF8"):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def _native_screenshot_result(result: dict[str, Any], path: str) -> Optional[dict[str, Any]]:
     """Build a multimodal tool result attaching path for vision models"""
     try:
@@ -343,9 +365,12 @@ def _native_screenshot_result(result: dict[str, Any], path: str) -> Optional[dic
         from tools.vision_tools_history_budget import resolve_embed_target_bytes
         if not _should_use_native_vision_fast_path():
             return None
+        mime = _sniffed_image_mime(path)
+        if mime is None:
+            return None  # not an image a provider accepts under any label — leave the text result alone
         # History-reuse cap: this data URL bakes into the tool result and is re-sent every later turn —
         # same policy as the vision_analyze / browser_vision native embeds.
-        data_url = _resize_image_for_vision(Path(path), mime_type="image/png",
+        data_url = _resize_image_for_vision(Path(path), mime_type=mime,
                                             max_base64_bytes=resolve_embed_target_bytes(),
                                             max_dimension=_EMBED_MAX_DIMENSION, force_jpeg=True)
         text = json.dumps(result, ensure_ascii=False)
