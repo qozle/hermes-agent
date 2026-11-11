@@ -290,6 +290,124 @@ def test_parent_worktree_deferred_until_children_done(
     assert not parent_wt.exists()
 
 
+def _shared_branch_worktree_task(
+    conn, repo: Path, branch: str, title: str, *, materialize: bool = True
+) -> tuple[str, Path]:
+    """A kanban worktree task on an existing (pushed) feature branch, the way
+    the review loop sets up the review card and its "Round N fixes" card."""
+    tid = kb.create_task(conn, title=title, assignee="worker")
+    wt = repo / ".worktrees" / tid
+    if materialize:
+        kbw._ensure_git_worktree(repo, wt, branch)
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET workspace_kind='worktree', workspace_path=?, "
+            "branch_name=? WHERE id=?",
+            (str(wt), branch, tid),
+        )
+    return tid, wt
+
+
+def _pushed_feature_branch(repo: Path, name: str = "fix/hold-release-reopen") -> str:
+    _git("-C", str(repo), "branch", name)
+    _git("-C", str(repo), "push", "origin", name)
+    return name
+
+
+def test_parent_worktree_released_for_same_branch_worktree_child(
+    kanban_home: Path, repo: Path
+) -> None:
+    """LOCAL COMMIT: the "Round N fixes" card (parent) completes while the
+    review card (child) waits on it, both on the PR branch. The parent's tree
+    must go at completion — the child cannot ``git worktree add`` a branch the
+    parent's tree still holds, and it needs nothing from that dir."""
+    branch = _pushed_feature_branch(repo)
+    with kbc.connect_closing() as conn:
+        fixes, fixes_wt = _shared_branch_worktree_task(conn, repo, branch, "Round 1 fixes")
+        review, review_wt = _shared_branch_worktree_task(
+            conn, repo, branch, "review card", materialize=False
+        )
+        kb.link_tasks(conn, fixes, review)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (fixes,))
+        assert kb.claim_task(conn, fixes, claimer="worker") is not None
+        assert kb.complete_task(conn, fixes, summary="fixes pushed")
+        assert not fixes_wt.exists()
+        # the branch itself is a custom one: kept, and now free for the child
+        assert _branch_exists(repo, branch)
+        kbw._ensure_git_worktree(repo, review_wt, branch)
+        assert review_wt.is_dir()
+
+
+def test_parent_worktree_still_deferred_for_child_needing_the_dir(
+    kanban_home: Path, repo: Path
+) -> None:
+    """The deferral stays for a child that is not a same-branch worktree task
+    (it may read handoff artifacts from the parent's dir)."""
+    branch = _pushed_feature_branch(repo)
+    with kbc.connect_closing() as conn:
+        parent, parent_wt = _shared_branch_worktree_task(conn, repo, branch, "parent")
+        child = kb.create_task(conn, title="scratch child", assignee="worker")
+        kb.link_tasks(conn, parent, child)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (parent,))
+        assert kb.claim_task(conn, parent, claimer="worker") is not None
+        assert kb.complete_task(conn, parent, summary="parent done")
+        assert parent_wt.is_dir()
+
+
+def test_worktree_add_releases_branch_from_idle_kanban_worktree(
+    kanban_home: Path, repo: Path
+) -> None:
+    """LOCAL COMMIT, dispatcher side: a clean, pushed sibling kanban tree whose
+    task is not running (done, or a review card parked in todo) is removed so
+    the branch can be checked out for the next card; a running holder is not."""
+    branch = _pushed_feature_branch(repo)
+    with kbc.connect_closing() as conn:
+        holder, holder_wt = _shared_branch_worktree_task(conn, repo, branch, "done card")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (holder,))
+        nxt, nxt_wt = _shared_branch_worktree_task(
+            conn, repo, branch, "next card", materialize=False
+        )
+        # without a connection the old failure is unchanged
+        with pytest.raises(RuntimeError, match="worktree add failed"):
+            kbw._ensure_git_worktree(repo, nxt_wt, branch)
+        assert holder_wt.is_dir()
+        # with it, the idle holder is released and the add retried
+        kbw._ensure_git_worktree(repo, nxt_wt, branch, conn=conn)
+        assert nxt_wt.is_dir()
+        assert not holder_wt.exists()
+        assert _branch_exists(repo, branch)
+
+        # a RUNNING holder keeps its tree, whatever its state
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (nxt,))
+        third, third_wt = _shared_branch_worktree_task(
+            conn, repo, branch, "third card", materialize=False
+        )
+        with pytest.raises(RuntimeError, match="worktree add failed"):
+            kbw._ensure_git_worktree(repo, third_wt, branch, conn=conn)
+        assert nxt_wt.is_dir()
+
+
+def test_worktree_add_never_releases_a_dirty_idle_holder(
+    kanban_home: Path, repo: Path
+) -> None:
+    branch = _pushed_feature_branch(repo)
+    with kbc.connect_closing() as conn:
+        holder, holder_wt = _shared_branch_worktree_task(conn, repo, branch, "done card")
+        (holder_wt / "wip.txt").write_text("unsaved\n", encoding="utf-8")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (holder,))
+        nxt, nxt_wt = _shared_branch_worktree_task(
+            conn, repo, branch, "next card", materialize=False
+        )
+        with pytest.raises(RuntimeError, match="worktree add failed"):
+            kbw._ensure_git_worktree(repo, nxt_wt, branch, conn=conn)
+        assert (holder_wt / "wip.txt").exists()
+
+
 def _running_scratch_parent(conn, title: str = "parent") -> tuple[str, Path]:
     tid = kb.create_task(conn, title=title)
     assert kb.claim_task(conn, tid) is not None  # -> running

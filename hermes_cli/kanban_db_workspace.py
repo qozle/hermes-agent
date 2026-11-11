@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -75,6 +76,34 @@ def _git(repo_root: Path, *args: str, timeout: int) -> subprocess.CompletedProce
 
 def _has_active_children(conn: sqlite3.Connection, task_id: str) -> bool:
     return conn.execute(_ACTIVE_CHILDREN_SQL, (task_id,)).fetchone() is not None
+
+
+# LOCAL COMMIT (frankentrait): a child that is itself a ``worktree`` task on
+# the SAME branch (the review loop's "Round N fixes" card is the parent of the
+# review card it unblocks, both on the PR branch) gets everything it needs from
+# the branch and cannot even start while the parent's tree still has that
+# branch checked out — ``git worktree add`` refuses a branch another worktree
+# holds. Deferring the parent's cleanup for such a child is therefore strictly
+# harmful: the child spawn-fails until the breaker blocks it.
+_ACTIVE_CHILDREN_NEEDING_DIR_SQL = (
+    "SELECT 1 FROM task_links l "
+    "JOIN tasks t ON t.id = l.child_id "
+    f"WHERE l.parent_id = ? AND t.status NOT IN {_TERMINAL_STATUSES_SQL} "
+    "AND NOT (t.workspace_kind = 'worktree' AND t.branch_name IS NOT NULL AND t.branch_name = ?) "
+    "LIMIT 1"
+)
+
+
+def _has_active_children_needing_dir(
+    conn: sqlite3.Connection, task_id: str, branch_name: Optional[str]
+) -> bool:
+    """Like :func:`_has_active_children`, minus same-branch worktree children."""
+    branch = (branch_name or "").strip()
+    if not branch:
+        return _has_active_children(conn, task_id)
+    return conn.execute(
+        _ACTIVE_CHILDREN_NEEDING_DIR_SQL, (task_id, branch)
+    ).fetchone() is not None
 
 
 _TERMINAL_TASK_SQL = (
@@ -378,8 +407,14 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             _try_cleanup_parent_workspaces(conn, task_id)
             return
         # Defer while any child is not yet terminal so it can still read
-        # handoff artifacts from this workspace.
-        if _has_active_children(conn, task_id):
+        # handoff artifacts from this workspace. A worktree child on the SAME
+        # branch needs the branch free, not this dir (LOCAL COMMIT, see
+        # ``_has_active_children_needing_dir``).
+        if (
+            _has_active_children_needing_dir(conn, task_id, row["branch_name"])
+            if kind == "worktree"
+            else _has_active_children(conn, task_id)
+        ):
             _kb._log.debug(
                 "Deferring %s workspace cleanup for task %s: "
                 "active children still need workspace at %s",
@@ -686,7 +721,61 @@ def _repo_root_for_worktree_target(path: Path) -> Optional[Path]:
         current = current.parent
 
 
-def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> None:
+_BRANCH_HELD_RE = re.compile(
+    r"is already (?:checked out|used by worktree) at '(?P<path>[^']+)'"
+)
+_KANBAN_WORKTREE_NAME_RE = re.compile(r"^t_[0-9a-f]+$")
+
+
+def _release_branch_from_idle_kanban_worktree(
+    repo_root: Path, target: Path, branch_name: str, stderr: str,
+    conn: Optional[sqlite3.Connection],
+) -> bool:
+    """LOCAL COMMIT (frankentrait): free ``branch_name`` when the worktree
+    holding it is a sibling kanban tree (``<repo>/.worktrees/t_<hex>``) whose
+    task has no live worker. The review loop hands one PR branch from card to
+    card (review card -> "Round N fixes" card -> review card); whichever tree
+    the previous card left behind blocks ``git worktree add`` for the next one
+    until the breaker parks it. Removal goes through
+    :func:`_cleanup_worktree_workspace`, so a dirty or unpushed tree is never
+    touched. Returns True when the holder is gone and ``add`` can be retried."""
+    if conn is None:
+        return False
+    match = _BRANCH_HELD_RE.search(stderr or "")
+    if match is None:
+        return False
+    holder = Path(match.group("path")).expanduser()
+    holder_resolved = holder.resolve(strict=False)
+    worktrees_root = (repo_root / ".worktrees").resolve(strict=False)
+    if (
+        _path_key(holder_resolved) == _path_key(target.resolve(strict=False))
+        or _path_key(holder_resolved.parent) != _path_key(worktrees_root)
+        or not _KANBAN_WORKTREE_NAME_RE.match(holder_resolved.name)
+    ):
+        return False
+    holder_task = holder_resolved.name
+    try:
+        row = conn.execute(
+            "SELECT status, branch_name FROM tasks WHERE id = ?", (holder_task,)
+        ).fetchone()
+    except Exception:
+        return False
+    if row is None or row["status"] == "running":
+        return False  # unknown tree, or a live worker is standing in it
+    if (row["branch_name"] or "").strip() != branch_name:
+        return False
+    _kb._log.info(
+        "Releasing branch %s for %s: idle kanban worktree %s (task %s, %s) holds it",
+        branch_name, target, holder_resolved, holder_task, row["status"],
+    )
+    _cleanup_worktree_workspace(holder_task, str(holder_resolved), branch_name)
+    return not holder_resolved.exists()
+
+
+def _ensure_git_worktree(
+    repo_root: Path, target: Path, branch_name: str,
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
     """Materialize ``target`` as a linked git worktree under ``repo_root``."""
     target = target.expanduser()
     repo_common = _git_common_dir(repo_root)
@@ -700,19 +789,29 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
     result = _git(repo_root, *args, timeout=60)
     if result.returncode != 0:
         stderr = (result.stderr or result.stdout or "").strip()
+        if _release_branch_from_idle_kanban_worktree(repo_root, target, branch_name, stderr, conn):
+            result = _git(repo_root, *args, timeout=60)
+            if result.returncode == 0:
+                return
+            stderr = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(
             f"git worktree add failed for {target} on branch {branch_name}: {stderr}"
         )
 
 
-def _anchored_worktree(repo_root: Path, task_id: str, branch_name: str) -> tuple[Path, str]:
+def _anchored_worktree(
+    repo_root: Path, task_id: str, branch_name: str,
+    conn: Optional[sqlite3.Connection] = None,
+) -> tuple[Path, str]:
     """Materialize the canonical ``<repo>/.worktrees/<task-id>`` worktree."""
     target = repo_root / ".worktrees" / task_id
-    _ensure_git_worktree(repo_root, target, branch_name)
+    _ensure_git_worktree(repo_root, target, branch_name, conn=conn)
     return target, branch_name
 
 
-def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> tuple[Path, str]:
+def _resolve_worktree_workspace(
+    task: Task, *, board: Optional[str] = None, conn: Optional[sqlite3.Connection] = None,
+) -> tuple[Path, str]:
     """Resolve + materialize a linked git worktree for ``task``. With no
     ``task.workspace_path`` the anchor is the board's ``default_workdir`` so
     every worktree lands under a board-owned repo (``<repo>/.worktrees/<id>``)
@@ -741,7 +840,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
                 f"task {task.id} has workspace_kind=worktree but board "
                 f"{board_slug!r} default_workdir {board_default!r} is not inside a git repo"
             )
-        return _anchored_worktree(repo_root, task.id, branch_name)
+        return _anchored_worktree(repo_root, task.id, branch_name, conn=conn)
 
     requested = Path(task.workspace_path).expanduser()
     if not requested.is_absolute():
@@ -764,7 +863,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
         if fallback_root is not None:
             fallback = fallback_root / ".worktrees" / task.id
             if _path_key(fallback.resolve(strict=False)) != _path_key(requested_resolved):
-                _ensure_git_worktree(fallback_root, fallback, branch_name)
+                _ensure_git_worktree(fallback_root, fallback, branch_name, conn=conn)
                 return fallback.resolve(strict=False), branch_name
         # No repo to anchor a fallback on (or the occupied path IS this task's
         # own canonical worktree): keep the legacy reuse rather than fail dispatch.
@@ -772,7 +871,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
 
     repo_root = _git_toplevel(requested)
     if repo_root is not None and _path_key(requested_resolved) == _path_key(repo_root):
-        return _anchored_worktree(repo_root, task.id, branch_name)
+        return _anchored_worktree(repo_root, task.id, branch_name, conn=conn)
 
     repo_root = _repo_root_for_worktree_target(requested.parent)
     if repo_root is None:
@@ -780,7 +879,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
             f"task {task.id} worktree path {task.workspace_path!r} is not inside a git repo "
             "and does not point at a git repo root"
         )
-    _ensure_git_worktree(repo_root, requested, branch_name)
+    _ensure_git_worktree(repo_root, requested, branch_name, conn=conn)
     return requested, branch_name
 
 
