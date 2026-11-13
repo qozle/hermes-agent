@@ -674,9 +674,14 @@ def _handle_show(args: dict, **kw) -> str:
                 "task to show by default. Call kanban_list to see task ids on "
                 "the board, then kanban_show(task_id=<id>) for full state."),
         })
+    # LOCAL COMMIT (frankentrait): a dispatcher-owned worker gets no ``worker_context``. Its first
+    # message already is that string for its own card, and for another card the body, comments
+    # and runs above carry the same text: the copy was 22K of a 50K answer (Max, 2026-11-12).
+    from agent.delegation_context import owned_kanban_task
+    for_worker = bool(owned_kanban_task())
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
-        return json.dumps({
+        out = {
             "task": _fields(task, _TASK_FIELDS),
             "parents": kb.parent_ids(conn, tid),
             # Non-terminal parents; on a running card this means the dependency
@@ -687,9 +692,11 @@ def _handle_show(args: dict, **kw) -> str:
             "comments": [_fields(c, _COMMENT_FIELDS) for c in kb.list_comments(conn, tid)],
             # Capped; full log via CLI.
             "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
-            "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
+            "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)]}
+        if not for_worker:
             # Same string build_worker_context hands the dispatcher at spawn time.
-            "worker_context": kb.build_worker_context(conn, tid)})
+            out["worker_context"] = kb.build_worker_context(conn, tid)
+        return json.dumps(out)
 
 
 @_kanban_handler("kanban_list")
