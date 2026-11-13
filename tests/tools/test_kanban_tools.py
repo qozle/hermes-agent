@@ -78,8 +78,19 @@ def test_show_defaults_to_env_task_id(worker_env):
     assert "task" in d
     assert d["task"]["id"] == worker_env
     assert d["task"]["status"] == "running"
-    assert "worker_context" in d
+    # LOCAL COMMIT (frankentrait): the worker's first message already is this string.
+    assert "worker_context" not in d
     assert "runs" in d
+
+
+def test_show_outside_a_worker_still_carries_worker_context(worker_env):
+    """LOCAL COMMIT (frankentrait): only the dispatcher-owned worker loses the copy; a session
+    that merely inspects a card keeps it."""
+    from agent.delegation_context import non_dispatcher_owned_context
+    from tools import kanban_tools as kt
+    with non_dispatcher_owned_context():
+        d = json.loads(kt._handle_show({"task_id": worker_env}))
+    assert "worker_context" in d
 
 
 def test_show_bare_call_outside_worker_returns_orientation_not_error(monkeypatch, worker_env):

@@ -208,3 +208,35 @@ def test_round_limit_blocks_the_review_card_for_max(kanban_home, monkeypatch):
         # a sticky block: the dispatcher never promotes it on its own
         kb.recompute_ready(conn)
         assert kb.get_task(conn, tid).status == "blocked"
+
+
+def test_fix_card_carries_the_reviewers_notes_from_this_round_in_full(kanban_home, monkeypatch):
+    """LOCAL COMMIT (frankentrait): a reason that reads "details in my comment" sent the fix
+    worker to kanban_show on the review card; the notes now travel in the fix card's body."""
+    _cfg(monkeypatch, review_fix_cards=True, review_max_rounds=4)
+    with kbc.connect() as conn:
+        tid, review = _review_card_with_implementer(conn)
+        reviewer = conn.execute(
+            "SELECT profile FROM task_runs WHERE id = ?", (review.current_run_id,)).fetchone()[0]
+        assert reviewer
+        kb.add_comment(conn, tid, "somebody-else", "ANOTHER AUTHOR'S NOTE")
+        detail = "FINDING ONE: " + "x" * 9000 + " END OF FINDING"
+        kb.add_comment(conn, tid, reviewer, detail)
+        ok, child = kb.request_changes(
+            conn, tid, reason="two corrections, details in my comment",
+            expected_run_id=review.current_run_id)
+        assert ok and child
+        body = kb.get_task(conn, child).body
+    assert "two corrections, details in my comment" in body
+    assert detail in body
+    assert "ANOTHER AUTHOR'S NOTE" not in body
+    assert "do not open the review card" in body
+
+
+def test_fix_card_body_is_unchanged_when_the_reviewer_left_no_note(kanban_home, monkeypatch):
+    _cfg(monkeypatch, review_fix_cards=True, review_max_rounds=4)
+    with kbc.connect() as conn:
+        tid, review = _review_card_with_implementer(conn)
+        ok, child = kb.request_changes(conn, tid, reason="fix it", expected_run_id=review.current_run_id)
+        assert ok and child
+        assert "notes from this round" not in kb.get_task(conn, child).body

@@ -271,9 +271,12 @@ KANBAN_GUIDANCE = (
     "backend (local/docker/modal/ssh).\n"
     "\n"
     "## Lifecycle\n\n"
-    "1. **Orient.** Call `kanban_show()` first (no args — it defaults to your task). The response includes title, "
-    "body, parent-task handoffs (summary + metadata), any prior attempts on this task if you're a retry, the full "
-    "comment thread, and a pre-formatted `worker_context` you can treat as ground truth.\n"
+    # LOCAL COMMIT (frankentrait): upstream orders `kanban_show()` first; here the first message
+    # already is the worker context, so the call re-read 30K the worker had (Max, 2026-11-12).
+    "1. **Orient.** Your first message already carries your task and is ground truth: title, body, parent-task "
+    "handoffs (summary + metadata), any prior attempts on this task if you're a retry, and the comment thread. "
+    "Work from it. Call `kanban_show()` only for something it does not carry (another card, the event log), "
+    "never to re-read your own task.\n"
     "2. **Work inside the workspace.** `cd $HERMES_KANBAN_WORKSPACE` before any file operations. The workspace is "
     "yours for this run. Don't modify files outside it unless the task explicitly asks.\n"
     "3. **Heartbeat on long operations.** Call `kanban_heartbeat(note=...)` every few minutes during long subprocesses "

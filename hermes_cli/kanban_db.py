@@ -3469,7 +3469,37 @@ def _review_round_number(conn: sqlite3.Connection, task_id: str) -> int:
     return int(row["n"] or 0) + 1
 
 
-def _fix_card_body(review_title: str, review_id: str, round_no: int, reason: str) -> str:
+_FIX_NOTE_MAX_CHARS = 16 * 1024
+
+
+def _review_round_notes(conn: sqlite3.Connection, task_id: str) -> str:
+    """LOCAL COMMIT (frankentrait): what the reviewer wrote on the review card during the run
+    that is asking for changes, in full. A reason often reads "details in comment N"; without
+    the text the fix worker opened the review card with kanban_show, about 50K characters, to
+    find it (Max, 2026-11-12)."""
+    row = conn.execute(
+        "SELECT r.profile, r.started_at FROM task_runs r JOIN tasks t ON t.current_run_id = r.id "
+        "WHERE t.id = ?", (task_id,),
+    ).fetchone()
+    if not row or not row[0]:
+        return ""
+    profile, since = row[0], int(row[1] or 0)
+    notes = []
+    for c in list_comments(conn, task_id):
+        text = (c.body or "").strip()
+        if c.author != profile or int(c.created_at or 0) < since or not text:
+            continue
+        if len(text) > _FIX_NOTE_MAX_CHARS:
+            text = text[:_FIX_NOTE_MAX_CHARS] + f"… [cut, {len(text) - _FIX_NOTE_MAX_CHARS} chars more on {task_id}]"
+        notes.append(text)
+    return "\n\n---\n\n".join(notes)
+
+
+def _fix_card_body(review_title: str, review_id: str, round_no: int, reason: str, notes: str = "") -> str:
+    notes_block = (
+        "The reviewer's notes from this round, in full. Everything the reviewer wrote is on this "
+        f"card: do not open the review card to look for more.\n\n{notes}\n\n"
+    ) if notes else ""
     return (
         f"Round {round_no} of the review of: {review_title}\n\n"
         f"The reviewer asked for these changes. Make them on the same PR branch, "
@@ -3477,6 +3507,7 @@ def _fix_card_body(review_title: str, review_id: str, round_no: int, reason: str
         f"kanban_complete (do not request review — the review card {review_id} "
         f"re-reviews on its own once this card is done).\n\n"
         f"Changes requested:\n{reason}\n\n"
+        f"{notes_block}"
         f"Scope: only the changes requested above. A finding outside them goes in "
         f"your summary as one line — never a new card or PR; Max decides what gets "
         f"built.\n"
@@ -3498,7 +3529,7 @@ def _open_review_fix_card(
     child_id = create_task(
         conn,
         title=f"Round {round_no} fixes: {parent.title}"[:200],
-        body=_fix_card_body(parent.title, task_id, round_no, reason),
+        body=_fix_card_body(parent.title, task_id, round_no, reason, _review_round_notes(conn, task_id)),
         assignee=assignee,
         created_by="review-loop",
         workspace_kind=workspace_kind,
