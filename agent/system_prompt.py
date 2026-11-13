@@ -298,10 +298,27 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
     return " ".join(g for g in tool_guidance if g) or None
 
 
+def _kanban_worker_skill_index() -> bool:
+    """``kanban.worker_skill_index`` (default off): show the skills index to kanban workers."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        return bool((load_config_readonly().get("kanban") or {}).get("worker_skill_index", False))
+    except Exception:
+        return False
+
+
 def _skills_prompt(agent: Any) -> str:
     """Skills index (empty without skills tools).  Focus mode demotes non-coding
     categories to names-only — never hidden, every name stays visible."""
     if not any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage']):
+        return ""
+    # LOCAL COMMIT (frankentrait): a dispatcher-owned kanban worker gets no skills index. The card
+    # and the skills pinned on it are its instructions (Max, 2026-11-12); the index's "you MUST
+    # load any skill that matches" order had workers loading the coordinator's skills (150K
+    # characters) before they touched the code. skill_view stays callable for a file the card
+    # names; pinned skills and the reviewer's sdlc-review still load.
+    # kanban.worker_skill_index: true restores the index.
+    if owned_kanban_task() and not _kanban_worker_skill_index():
         return ""
     import model_tools
     avail_toolsets = {model_tools.get_toolset_for_tool(tool_name) for tool_name in agent.valid_tool_names} - {None, ""}

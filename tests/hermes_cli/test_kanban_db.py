@@ -2082,3 +2082,16 @@ def test_archive_non_running_task_does_not_attempt_termination(kanban_home):
             (t,),
         ).fetchone()
         assert row is None
+
+
+
+def test_worker_context_carries_a_long_card_body_whole(kanban_home):
+    """LOCAL COMMIT (frankentrait): the body is the worker's instructions. Cut at 8K, the worker
+    fetched the rest with kanban_show, which returns the card several times over."""
+    body = "\n".join(f"step {i}: " + "x" * 90 for i in range(200)) + "\nLAST LINE OF THE CARD"
+    assert 16_000 < len(body) < 64_000
+    with kbc.connect() as conn:
+        t = kb.create_task(conn, title="long card", assignee="a", body=body)
+        ctx = kb.build_worker_context(conn, t)
+    assert "LAST LINE OF THE CARD" in ctx
+    assert "chars omitted" not in ctx

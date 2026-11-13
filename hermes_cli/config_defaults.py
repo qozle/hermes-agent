@@ -1964,6 +1964,10 @@ DEFAULT_CONFIG = {
         "review_fix_cards": False,
         "review_max_rounds": 4,
         "review_fix_assignee": "",
+        # LOCAL COMMIT (frankentrait): show the skills index (and its "load every matching
+        # skill" order) to dispatcher-owned kanban workers. Off: a worker gets the card and the
+        # skills pinned on it, nothing else (Max, 2026-11-12).
+        "worker_skill_index": False,
         # LOCAL COMMIT (frankentrait): subscription applied to every card created from the CLI
         # (no session to auto-subscribe): {platform, chat_id, chat_type, user_id, user_id_alt,
         # thread_id, notifier_profile, delivery_mode}. None = CLI-created cards ping nobody.
