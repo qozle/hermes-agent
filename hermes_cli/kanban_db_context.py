@@ -23,7 +23,10 @@ if TYPE_CHECKING:
 _CTX_MAX_PRIOR_ATTEMPTS = 10      # most recent N prior runs shown in full
 _CTX_MAX_COMMENTS       = 30      # most recent N comments shown in full
 _CTX_MAX_FIELD_BYTES    = 4 * 1024   # per summary/error/metadata/result
-_CTX_MAX_BODY_BYTES     = 8 * 1024   # per task.body (opening post)
+# LOCAL COMMIT (frankentrait): 64K, was 8K. A body cut at 8K sent the worker to kanban_show for
+# the rest, which returns the card several times over (events, runs, parent results). The card
+# is the worker's instructions and reaches it whole (Max, 2026-11-12).
+_CTX_MAX_BODY_BYTES     = 64 * 1024  # per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
 
 

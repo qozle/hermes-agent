@@ -956,3 +956,41 @@ class TestConversationStartedTwoLine:
         vol = self._volatile(agent)
         assert "Conversation started:" not in vol
         assert "as of the last context rebuild" not in vol
+
+
+
+@pytest.mark.parametrize("task_id, owner, flag, expected", [
+    (None, True, False, "INDEX"),         # an interactive session keeps its skills index
+    ("t_worker", True, False, ""),        # the dispatcher-owned worker gets none
+    ("t_worker", False, False, "INDEX"),  # a cron run / delegate child inheriting the env keeps it
+    ("t_worker", True, True, "INDEX"),    # kanban.worker_skill_index: true restores it
+])
+def test_skills_index_is_withheld_from_an_owned_kanban_worker(monkeypatch, task_id, owner, flag, expected):
+    """LOCAL COMMIT (frankentrait): the card and its pinned skills are a kanban worker's
+    instructions, so the index (and its "load every matching skill" order) is not sent to it."""
+    from contextlib import nullcontext
+
+    import agent.system_prompt as sp
+    from agent.delegation_context import non_dispatcher_owned_context
+
+    if task_id is None:
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    monkeypatch.setattr(sp, "_kanban_worker_skill_index", lambda: flag)
+    monkeypatch.setattr(sp._pb, "build_skills_system_prompt", lambda **_kw: "INDEX")
+    monkeypatch.setattr(sp, "_agent_skills_dir", lambda _agent: None)
+    agent = _make_agent(valid_tool_names={"skill_view", "skills_list"})
+
+    with nullcontext() if owner else non_dispatcher_owned_context():
+        assert sp._skills_prompt(agent) == expected
+
+
+def test_kanban_worker_skill_index_defaults_off_and_reads_the_config(monkeypatch):
+    import agent.system_prompt as sp
+    import hermes_cli.config as cfg
+
+    monkeypatch.setattr(cfg, "load_config_readonly", lambda: {"kanban": {}})
+    assert sp._kanban_worker_skill_index() is False
+    monkeypatch.setattr(cfg, "load_config_readonly", lambda: {"kanban": {"worker_skill_index": True}})
+    assert sp._kanban_worker_skill_index() is True
