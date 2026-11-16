@@ -305,7 +305,8 @@ KANBAN_GUIDANCE = (
     "completion metadata, so the orchestrator can decompose that file before more work lands on it.\n"
     "8. **One card = one session.** A long thread is re-read in full on every turn, so a card worked past its context "
     "budget costs more than the work left in it. If a `ctx:` comment lands on your card, finish the step in hand, "
-    "`kanban_create` a child card (same assignee, `parents=[your id]`) carrying everything still undone plus the state "
+    "`kanban_create` a child card (same assignee, `parents=[your id]`, and the same `skills` and `workspace` this card " \
+    "carries — the `ctx:` comment names them) carrying everything still undone plus the state "
     "a fresh worker needs, then `kanban_complete` with what IS done. Never grind past the nudge.\n"
     "\n"
     "## Orchestrator mode\n\n"
