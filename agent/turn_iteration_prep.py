@@ -402,6 +402,17 @@ def begin_iteration(
             agent._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
         return _verdict("break")
 
+    # LOCAL COMMIT (frankentrait): a kanban worker waits here, awake, while the quota guard's
+    # WORKER_PAUSE sentinel holds — the step it was in has finished, nothing is mid-call — and
+    # resumes this same turn when the usage window resets (agent/worker_pause.py).
+    from agent.worker_pause import wait_out_worker_pause
+
+    if wait_out_worker_pause(agent):
+        interrupted = True
+        _issuer = interrupt_issuer(agent)
+        _turn_exit_reason = f"interrupted_by_system({_issuer})" if _issuer else "interrupted_by_user"
+        return _verdict("break")
+
     # Aggregate input budget for detached auxiliary forks bounds the whole review, not
     # each request; checked between iterations so the crossing request's writes landed.
     if _review_input_budget_exhausted(agent):
