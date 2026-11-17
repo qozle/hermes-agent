@@ -89,3 +89,20 @@ def test_request_review_shares_the_live_worker_fence(conn):
     ok, reason = kb.request_review(conn, tid2, summary="steal", with_reason=True)
     assert ok is False and "live claim" in reason
     assert kb.request_review(conn, tid2, summary="own", expected_run_id=run2) is True
+
+
+def test_request_review_clears_a_stale_failure_note(conn):
+    """A quota-wall note stamped by an earlier run parked the card in review forever:
+    the respawn guard read it as blocker_auth and never spawned the reviewer."""
+    tid, _ = _claimed_running_task(conn, live_worker=False)
+    conn.execute(
+        "UPDATE tasks SET last_failure_error = ?, consecutive_failures = 1 WHERE id = ?",
+        ("pid 1 exited rate-limited (quota wall) — requeued", tid),
+    )
+    conn.commit()
+    assert kb.request_review(conn, tid, summary="handoff") is True
+    row = conn.execute(
+        "SELECT last_failure_error, consecutive_failures FROM tasks WHERE id = ?", (tid,),
+    ).fetchone()
+    assert row["last_failure_error"] is None
+    assert row["consecutive_failures"] == 0

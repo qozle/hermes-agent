@@ -1015,7 +1015,9 @@ def _assert_full_inherited_sub(subs):
         "delivery_metadata dropped during inheritance (issue #73030)"
     )
 
-def test_link_tasks_inherits_all_routing_columns(kanban_home):
+def test_link_tasks_does_not_inherit_watchers(kanban_home):
+    """Ordering links never copy subscribers: a chain of 'run after' cards collected
+    every chat that ever touched an ancestor and one handoff woke them all."""
     import hermes_cli.kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_notify as kbn
@@ -1024,16 +1026,14 @@ def test_link_tasks_inherits_all_routing_columns(kanban_home):
     try:
         parent = kb.create_task(conn, title="root", assignee=None)
         _add_full_parent_sub(kb, conn, parent)
-        # Pre-existing child, linked after the fact — exercises
-        # _inherit_notify_subs directly (not the create_task parents path).
         child = kb.create_task(conn, title="existing child", assignee="w1")
         kb.link_tasks(conn, parent, child)
         subs = kbn.list_notify_subs(conn, child)
     finally:
         conn.close()
-    _assert_full_inherited_sub(subs)
+    assert subs == []
 
-def test_create_with_parents_inherits_delivery_metadata(kanban_home):
+def test_create_with_parents_does_not_inherit_watchers(kanban_home):
     import hermes_cli.kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_notify as kbn
@@ -1044,6 +1044,24 @@ def test_create_with_parents_inherits_delivery_metadata(kanban_home):
         _add_full_parent_sub(kb, conn, parent)
         child = kb.create_task(
             conn, title="graph child", assignee="w1", parents=[parent],
+        )
+        subs = kbn.list_notify_subs(conn, child)
+    finally:
+        conn.close()
+    assert subs == []
+
+def test_creator_card_still_passes_its_chat_to_a_child(kanban_home):
+    """A card made BY a card reports to that card's human chat (creator_task_id path)."""
+    import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_notify as kbn
+
+    conn = kbc.connect()
+    try:
+        creator = kb.create_task(conn, title="root", assignee=None)
+        _add_full_parent_sub(kb, conn, creator)
+        child = kb.create_task(
+            conn, title="spawned by card", assignee="w1", creator_task_id=creator,
         )
         subs = kbn.list_notify_subs(conn, child)
     finally:

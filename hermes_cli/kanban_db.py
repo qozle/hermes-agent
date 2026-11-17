@@ -1353,8 +1353,10 @@ def create_task(
                             {"reason": "parent_not_done", "parent": gating[0]},
                         )
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
+                # Only the CREATOR card's chat is inherited. Ordering parents never pass
+                # their watchers on: an ordered chain collected every chat that ever touched
+                # an ancestor (6 on one card) and a single handoff woke them all.
                 inherit_creator_origin(conn, task_id, creator_task_id, created_at=now)
-                _inherit_notify_subs(conn, task_id, parents, created_at=now)
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -1618,7 +1620,7 @@ def link_tasks(
             "linked",
             {"parent": parent_id, "child": child_id},
         )
-        _inherit_notify_subs(conn, child_id, (parent_id,))
+        # No watcher inheritance on link: ordering is a dependency, not a report-to.
     return gated
 
 
@@ -3392,6 +3394,13 @@ def request_review(
                 return _ret(
                     False, "task is not in running/ready (or expected_run_id did not match the current run)",
                 )
+            # A clean handoff is a successful run: wipe the stale failure note, or a
+            # "quota wall" stamped by an earlier run parks the card in review forever
+            # (the respawn guard reads it as blocker_auth and never spawns the reviewer).
+            conn.execute(
+                "UPDATE tasks SET consecutive_failures = 0, last_failure_error = NULL WHERE id = ?",
+                (task_id,),
+            )
             if isinstance(metadata, dict):
                 staged_copies = _stage_completion_artifacts(
                     conn, task_id, metadata, now, uploaded_by="kanban_request_review",
