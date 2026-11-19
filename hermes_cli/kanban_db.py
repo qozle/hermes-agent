@@ -3353,6 +3353,10 @@ def request_review(
                         "latest changes_requested event is missing or "
                         "malformed); pass reviewer= explicitly",
                     )
+            if reviewer is None:
+                # LOCAL COMMIT (frankentrait): no reviewer named and no earlier
+                # round -> the board's default reviewer, never the builder's tier.
+                reviewer = _default_reviewer()
             reviewer = _canonical_assignee(reviewer)
             # The actor is the run that did the work. ``assignee`` is the actor
             # only while a worker holds the card; on a never-claimed card it is
@@ -3444,6 +3448,18 @@ def _prior_reviewer(conn: sqlite3.Connection, task_id: str):
 
 def _nonblank_str(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value.strip() else None
+
+
+def _default_reviewer() -> Optional[str]:
+    """LOCAL COMMIT (frankentrait): ``kanban.default_reviewer`` -- the tier a review
+    goes to when the hand-off names no reviewer and no earlier round recorded one.
+    Read from the board owner's config (``board_kanban_config``), because the
+    hand-off runs inside a worker whose HERMES_HOME is its tier profile. Blank =
+    the upstream behaviour: the card stays with its builder's tier, so a builder
+    that forgets the name reviews its own work (two Sonnet-built cards did,
+    2026-11-19, though both card bodies named the reviewer)."""
+    value = _nonblank_str(board_kanban_config().get("default_reviewer"))
+    return value.strip() if value else None
 
 
 def _review_fix_cards_config() -> tuple[bool, int, Optional[str]]:

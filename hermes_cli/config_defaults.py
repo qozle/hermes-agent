@@ -1929,6 +1929,10 @@ DEFAULT_CONFIG = {
         "review_fix_cards": False,
         "review_max_rounds": 4,
         "review_fix_assignee": "",
+        # LOCAL COMMIT (frankentrait): the tier a review goes to when the worker's hand-off
+        # names no reviewer and no earlier round recorded one. "" = it stays with the
+        # builder's tier (upstream behaviour), so the builder reviews its own work.
+        "default_reviewer": "",
         # LOCAL COMMIT (frankentrait): show the skills index (and its "load every matching
         # skill" order) to dispatcher-owned kanban workers. Off: a worker gets the card and the
         # skills pinned on it, nothing else (Max, 2026-11-12).
