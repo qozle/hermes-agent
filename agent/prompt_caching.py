@@ -161,6 +161,28 @@ def auto_cache_ttl_for_source(source: str | None) -> str:
     return "5m" if (source or "").strip().lower() in MACHINE_PACED_SOURCES else "1h"
 
 
+# LOCAL COMMIT (frankentrait): a kanban card-wake turn caches at 1h whatever the configured tier.
+# A chat subscribed to a chain of cards is woken every 5-30 minutes (hand-off, finish, next card)
+# with nobody typing in between, so on 5m every ping re-writes the whole chat into the cache
+# (~$2 for a 440K-token chat); a 1h write keeps the next ping a cache read. Only the wake turn's
+# own requests change, so the owner's quick back-and-forth stays on the configured tier.
+CARD_WAKE_PREFIX = "[kanban] Task "
+
+
+def is_card_wake_message(user_message: Any) -> bool:
+    """True for the kanban notifier's synthetic wake turn (``[kanban] Task <id> <status>. ...``)."""
+    return isinstance(user_message, str) and user_message.lstrip().startswith(CARD_WAKE_PREFIX)
+
+
+def turn_cache_ttl(agent: Any) -> str | None:
+    """The TTL this turn's requests carry: ``1h`` on a card-wake turn, else the agent's configured
+    tier (``None`` stays ``None``: caching disabled is never switched on here)."""
+    ttl = getattr(agent, "_cache_ttl", None)
+    if ttl is not None and getattr(agent, "_card_wake_turn", False):
+        return "1h"
+    return ttl
+
+
 def effective_cache_ttl(ttl: str | None, *, model: str = "", provider: str = "") -> str:
     """Clamp a requested cache TTL to what the destination route supports (``None`` → ``5m``).
 

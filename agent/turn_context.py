@@ -1214,6 +1214,10 @@ def build_turn_context(
     # Reset first: a cached gateway agent must never carry the previous turn's bot author into a human turn.
     turn_author = parse_turn_author(turn_author)
     agent._turn_author = turn_author
+    # LOCAL COMMIT (frankentrait): per-turn, so a card-wake turn's 1h cache tier never leaks into the
+    # next human turn (prompt_caching.turn_cache_ttl reads it at every request).
+    from agent.prompt_caching import is_card_wake_message
+    agent._card_wake_turn = is_card_wake_message(user_message)
 
     # Recover a rotated session before binding log/turn ids or copying client history so
     # everything in this turn belongs to the canonical child.

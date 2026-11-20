@@ -15,7 +15,7 @@ from typing import Any
 
 from agent.message_sanitization import _sanitize_messages_surrogates
 from agent.usage_anchor import anchored_context_tokens
-from agent.prompt_caching import build_prompt_cache_plan, effective_cache_ttl
+from agent.prompt_caching import build_prompt_cache_plan, effective_cache_ttl, turn_cache_ttl
 from agent.turn_context import build_api_messages
 
 logger = logging.getLogger("agent.conversation_loop")
@@ -214,7 +214,7 @@ def assemble_api_request(
             # Clamp per-destination: a configured 1h regresses to 5m on
             # Qwen/Alibaba routes, whose context cache is 5m-only.
             cache_ttl=effective_cache_ttl(
-                agent._cache_ttl, provider=agent.provider, model=agent.model
+                turn_cache_ttl(agent), provider=agent.provider, model=agent.model
             ),
             native_anthropic=agent._use_native_cache_layout,
             static_system_prefix=(
