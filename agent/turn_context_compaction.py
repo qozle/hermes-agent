@@ -123,6 +123,119 @@ def _reanchor(agent: Any, messages: list[Any], user_message: Any) -> int:
     return idx
 
 
+# LOCAL COMMIT (frankentrait): a kanban card-wake turn over this many tokens attempts
+# compaction before any model call, focused on this chat's own open cards. On Nov 19-20
+# pings into 250K-470K token chats were 18% of all usage; compacting costs ~60 cents, one
+# ping into a 440K-token chat costs ~$2. Independent of ``compression.threshold_percent``
+# (often far above this on a big context window) and of idle compaction (opt-in,
+# wall-clock gated) -- token count alone decides whether this pass is ATTEMPTED; the
+# attempt itself still honors the same automatic cooldown/breaker gates idle compaction
+# does (no ``force``), so a blocked guard or held lock leaves the ping uncompacted.
+CARD_WAKE_COMPACT_THRESHOLD_TOKENS = 150_000
+
+
+def _card_wake_open_cards(agent: Any) -> list[tuple[str, str]]:
+    """``(id, title)`` for every open (not ``done``/``archived``) card this chat is
+    subscribed to, read straight from ``kanban_notify_subs`` joined to ``tasks`` on the
+    default board. A terminal chat (``agent.platform == "cli"``) never sets ``_chat_id``;
+    its subscription is stored as platform ``local`` with ``chat_id`` equal to the chat's
+    ``session_id``, so match that shape instead of the gateway-chat one. ``[]`` for an
+    agent with no chat identity to match (CLI with no session id, API, subagent, cron) or
+    an unreadable/missing board -- the caller still compacts, just with a focus topic
+    naming nothing.
+    """
+    platform = getattr(agent, "platform", None)
+    if platform == "cli":
+        lookup_platform: Optional[str] = "local"
+        chat_id = getattr(agent, "session_id", None)
+    else:
+        lookup_platform = platform
+        chat_id = getattr(agent, "_chat_id", None)
+    if not lookup_platform or not chat_id:
+        return []
+    thread_id = getattr(agent, "_thread_id", None) or ""
+    import sqlite3
+
+    try:
+        from hermes_cli.kanban_db import kanban_db_path
+
+        path = kanban_db_path()
+        if not path.exists():
+            return []
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    except (OSError, sqlite3.Error):
+        return []
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT DISTINCT t.id AS id, t.title AS title FROM kanban_notify_subs s "
+            "JOIN tasks t ON t.id = s.task_id "
+            "WHERE LOWER(s.platform) = LOWER(?) AND s.chat_id = ? AND COALESCE(s.thread_id, '') = ? "
+            "AND t.status NOT IN ('done', 'archived') ORDER BY t.id",
+            (str(lookup_platform), str(chat_id), str(thread_id)),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    return [(row["id"], row["title"] or "") for row in rows]
+
+
+def _card_wake_focus_topic(agent: Any) -> str:
+    """Focus text for a card-wake compaction: names every open card this chat is subscribed
+    to (id + title) and asks the summary to keep their plans, rules and decisions verbatim.
+    Still a safe, generic ask when the chat has no gateway identity or no open card resolves."""
+    cards = _card_wake_open_cards(agent)
+    if not cards:
+        return (
+            "This chat is woken by kanban card pings. Keep the plans, rules and decisions "
+            "for any open card discussed in this chat word for word; summarize everything else."
+        )
+    named = "; ".join(f"{card_id} ({title})" if title else card_id for card_id, title in cards)
+    return (
+        f"This chat is subscribed to these open kanban cards: {named}. Keep their plans, "
+        "rules and decisions word for word; summarize everything else."
+    )
+
+
+def _card_wake_compaction(
+    agent: Any, out: CompactionOutcome, system_message: Optional[str], user_message: Any,
+    effective_task_id: str,
+) -> None:
+    """A kanban card-wake turn (``agent._card_wake_turn``, see ``prompt_caching.py``) over
+    :data:`CARD_WAKE_COMPACT_THRESHOLD_TOKENS` compacts right here, before idle/preflight
+    compaction and before any model call. It calls ``agent._compress_context`` the same way
+    ``_idle_compaction`` does -- no ``force`` -- so the automatic summary-failure cooldown,
+    structural backoff and anti-thrash breaker still gate it; a guard block or a held lock
+    leaves the ping to run uncompacted on the original (over-threshold) messages this turn,
+    same as any other blocked automatic pass. A typed (non-wake) turn never reaches this
+    function with a truthy ``_card_wake_turn``, so it is untouched by this rule.
+    """
+    if not agent.compression_enabled or not getattr(agent, "_card_wake_turn", False):
+        return
+    from agent import turn_context as _tc
+
+    messages = out.messages
+    tokens = _tc._preflight_request_tokens(agent, messages, out.active_system_prompt or "")
+    if tokens <= CARD_WAKE_COMPACT_THRESHOLD_TOKENS:
+        return
+    logger.info(
+        "Card-wake compaction: ~%s tokens > %s threshold (session %s)",
+        f"{tokens:,}", f"{CARD_WAKE_COMPACT_THRESHOLD_TOKENS:,}", agent.session_id or "none",
+    )
+    out.messages, out.active_system_prompt = agent._compress_context(
+        messages, system_message, approx_tokens=tokens, task_id=effective_task_id,
+        focus_topic=_card_wake_focus_topic(agent), trigger="card_wake",
+    )
+    if out.messages is not messages:
+        out.compressed = True
+        out.conversation_history = conversation_history_after_compression(
+            agent, out.messages, out.conversation_history
+        )
+        _reset_retry_state_after_compaction(agent)
+        out.current_turn_user_idx = _reanchor(agent, out.messages, user_message)
+
+
 # ── Turn-start passes ──
 
 
@@ -131,11 +244,13 @@ def run_turn_start_compaction(
     active_system_prompt: Optional[str], conversation_history: Optional[list[dict[str, Any]]],
     current_turn_user_idx: int, user_message: Any, effective_task_id: str,
 ) -> CompactionOutcome:
-    """Idle compaction, then preflight compression (or the uncompressed guard)."""
+    """Card-wake compaction, then idle compaction, then preflight compression (or the
+    uncompressed guard)."""
     out = CompactionOutcome(
         messages=messages, active_system_prompt=active_system_prompt,
         conversation_history=conversation_history, current_turn_user_idx=current_turn_user_idx,
     )
+    _card_wake_compaction(agent, out, system_message, user_message, effective_task_id)
     _idle_compaction(agent, out, system_message, user_message, effective_task_id)
     _preflight_compression(agent, out, system_message, user_message, effective_task_id)
     return out
