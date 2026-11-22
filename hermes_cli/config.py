@@ -3111,6 +3111,14 @@ _SCALAR_WORDS = {
     'null': None, 'none': None, '~': None}
 
 
+def _none_is_a_reasoning_level(key: str) -> bool:
+    """``none`` is a reasoning level (thinking off) at every reasoning-effort path, and YAML reads a
+    hand-written ``none`` as that string; the ``none`` -> null shorthand would store "unset" there,
+    which the resolver reads as the provider's default effort, leaving thinking ON."""
+    parts = _split_key_path(key)
+    return parts[-1:] == ["reasoning_effort"] or (len(parts) == 3 and parts[:2] == ["agent", "reasoning_overrides"])
+
+
 def _coerce_config_set_value(key: str, value: str) -> Any:
     """Auto-coerce a ``hermes config set`` string to bool/None/int/float/list/dict.
     String-typed settings (per ``DEFAULT_CONFIG``) are preserved verbatim so enum members such as
@@ -3124,6 +3132,8 @@ def _coerce_config_set_value(key: str, value: str) -> Any:
         return value
     stripped = value.strip()
     lower = stripped.lower()
+    if lower == "none" and _none_is_a_reasoning_level(key):
+        return lower
     if lower in _SCALAR_WORDS:
         return _SCALAR_WORDS[lower]
     for coerce in (_coerce_int, _coerce_float):

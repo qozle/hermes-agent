@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 # Core-owned keys read at runtime but deliberately absent from DEFAULT_CONFIG -> their reader.
 CORE_RUNTIME_KEYS: dict[str, str] = {
+    # Unseeded on purpose: an absent key means the provider's own default effort, and the resolver
+    # keeps a YAML ``false`` (thinking off) as given. A string level or the bespoke-tier dict form.
+    "agent.reasoning_effort": "hermes_constants.py resolve_reasoning_config() (unset = provider default)",
     "computer_use.backend": "plugins/computer_use/__init__.py configured_backend_name() (unset = cua)",
     "dashboard.kanban": "plugins/kanban/dashboard/plugin_api.py (bundled dashboard tab preferences)",
 }

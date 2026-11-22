@@ -142,6 +142,36 @@ def test_computer_use_backend_set_is_what_the_selector_reads(hermes_home, capsys
     assert configured_backend_name() == "widget-driver"
 
 
+@pytest.mark.parametrize("value,expected", [
+    ("xhigh", {"enabled": True, "effort": "xhigh"}),
+    ("max", {"enabled": True, "effort": "max"}),
+    ("none", {"enabled": False}),
+])
+def test_agent_reasoning_effort_set_is_what_the_resolver_reads(value, expected, hermes_home, capsys):
+    from hermes_cli.config import load_config
+    from hermes_constants import resolve_reasoning_config
+
+    assert not _set_notice("agent.reasoning_effort", value, capsys)
+    assert resolve_reasoning_config(load_config()) == expected
+
+
+def test_agent_reasoning_effort_typo_still_notices(hermes_home, monkeypatch, capsys):
+    monkeypatch.setattr("hermes_cli.config_runtime_keys.plugin_declared_config_keys", frozenset)
+    assert _set_notice("agent.reasoning_efort", "xhigh", capsys)
+
+
+def test_reasoning_override_none_is_thinking_off_not_unset(hermes_home, capsys):
+    from hermes_cli.config import load_config
+    from hermes_constants import resolve_reasoning_config
+
+    _set_notice("agent.reasoning_effort", "xhigh", capsys)
+    _set_notice("agent.reasoning_overrides.claude-opus-5-5", "none", capsys)
+    assert resolve_reasoning_config(load_config(), "claude-opus-5-5") == {"enabled": False}
+    assert resolve_reasoning_config(load_config(), "claude-sonnet-5") == {"enabled": True, "effort": "xhigh"}
+    set_config_value("agent.reasoning_effort", "null")  # null still clears the key
+    assert resolve_reasoning_config(load_config(), "claude-sonnet-5") is None
+
+
 def test_plugin_config_keys_count_only_while_the_plugin_is_enabled(hermes_home, capsys):
     _plugin(hermes_home / "plugins", "widget-plugin", ["display.widget"])
 
