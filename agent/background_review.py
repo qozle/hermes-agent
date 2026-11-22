@@ -170,7 +170,14 @@ def cancel_background_review_for_live_turn(
 # Aux-model routing: by default ("auto") the fork runs on the MAIN model and replays the full
 # conversation as warm cache reads. When auxiliary.background_review.{provider,model} routes it
 # to a DIFFERENT model the cache is cold anyway, so the fork replays a compact digest instead.
+# Same-model forks get the digest too once the PARENT chat is already near its own compression
+# threshold (_REVIEW_DIGEST_NEAR_THRESHOLD_FRACTION): replaying the full near-threshold snapshot
+# would trip the fork's OWN in-place compaction (_detach_fork_compression) on a copy that is
+# thrown away by design, paying the compression cost while the live chat stays exactly as big.
 _REVIEW_MAX_ITERATIONS = 16
+# Fraction of the parent's context_compressor.threshold_tokens at/above which a same-model review
+# fork replays the digest instead of the full snapshot (see _chat_near_compression_threshold).
+_REVIEW_DIGEST_NEAR_THRESHOLD_FRACTION = 0.8
 # Aggregate INPUT-token budget for one review fork (checked in conversation_loop's
 # ``_review_input_budget_exhausted``). Request #1 replays the full snapshot as a warm cache read
 # (both compression gates deferred until the first response); compaction then bounds each
@@ -330,9 +337,11 @@ def _msg_text(m: dict) -> str:
 
 
 def _digest_history(messages_snapshot: list[dict], tail: int = 24) -> list[dict]:
-    """Compact replay for the routed (different-model) path only: keep the recent ``tail``
-    messages verbatim (extended so the kept run never starts on a tool result) and collapse older
-    turns into one synthetic user-role digest, preserving role alternation."""
+    """Compact replay for the routed (different-model) path, and for a same-model fork once the
+    parent chat is itself near its own compression threshold (see
+    ``_chat_near_compression_threshold``): keep the recent ``tail`` messages verbatim (extended so
+    the kept run never starts on a tool result) and collapse older turns into one synthetic
+    user-role digest, preserving role alternation."""
     msgs = list(messages_snapshot or [])
     while len(msgs) > tail:
         keep = msgs[-tail:]
@@ -360,6 +369,27 @@ def _digest_history(messages_snapshot: list[dict], tail: int = 24) -> list[dict]
         "follow verbatim below.]\n" + "\n".join(lines)
     )
     return [{"role": "user", "content": digest}] + keep
+
+
+def _chat_near_compression_threshold(
+    agent: Any, fraction: float = _REVIEW_DIGEST_NEAR_THRESHOLD_FRACTION,
+) -> bool:
+    """True when the PARENT chat's last known prompt size is already at/above ``fraction`` of its
+    own compression trigger (``context_compressor.threshold_tokens`` — the same figure
+    ``should_compress`` checks ``last_prompt_tokens`` against). A same-model review fork spawned
+    this close to the line would otherwise replay the FULL snapshot, immediately trip its own
+    in-place compaction (``_detach_fork_compression``), and pay the compression cost on a fork
+    copy that is thrown away by design — leaving the live chat exactly as big as before. Missing
+    or not-yet-populated compressor state (fresh agent, no real usage yet) is treated as "not
+    near" so the full-snapshot cache-read path is unchanged for everything below the line."""
+    compressor = getattr(agent, "context_compressor", None)
+    threshold = getattr(compressor, "threshold_tokens", None)
+    tokens = getattr(compressor, "last_prompt_tokens", None)
+    if not isinstance(threshold, (int, float)) or isinstance(threshold, bool) or threshold <= 0:
+        return False
+    if not isinstance(tokens, (int, float)) or isinstance(tokens, bool) or tokens <= 0:
+        return False
+    return tokens >= fraction * threshold
 
 
 # Review prompts. AIAgent exposes them as class attributes (``_MEMORY_REVIEW_PROMPT`` etc.) so
@@ -1224,14 +1254,25 @@ def _run_review_fork(
         _reset_background_review_read_marks()
     try:
         if review_run is None or review_run.begin_request(st.review_agent):
-            # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).
+            # Routed -> digest (cache cold anyway); same model near ITS OWN compression
+            # threshold -> digest too (the fork would otherwise compress a disposable copy
+            # while the live chat stays big, see _chat_near_compression_threshold); otherwise
+            # the full snapshot as warm cache reads.
+            use_digest = _routed or _chat_near_compression_threshold(agent)
+            # Request #1 replaying the digest already diverges the stream from the parent's
+            # prompt right after the system prompt — stamp that BEFORE run_conversation so a
+            # same-model fork on a slot-keyed route (xAI) resolves its own ``<scope>::review``
+            # from request #1 instead of riding the parent's slot key until a compaction that,
+            # for a disposable digest fork, may never come (see _apply_fork_tag). A no-op on
+            # routed forks: they never get a ``_prompt_cache_fork_tag`` to begin with.
+            st.review_agent._prompt_cache_fork_diverged = use_digest
             st.review_agent.run_conversation(
                 user_message=(
                     prompt + "\n\nYou can only call " + memory_phrase_prompt +
                     "management tools. Other tools will be denied "
                     "at runtime — do not attempt them." + prompt_extra
                 ),
-                conversation_history=_digest_history(messages_snapshot) if _routed else messages_snapshot,
+                conversation_history=_digest_history(messages_snapshot) if use_digest else messages_snapshot,
             )
     finally:
         clear_thread_tool_whitelist()

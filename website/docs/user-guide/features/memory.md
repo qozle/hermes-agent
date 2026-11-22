@@ -413,14 +413,17 @@ summary of older ones) rather than the full transcript — minimizing what it
 writes to the new cache. Capture holds: in testing, memory capture was
 identical and skill capture near-identical to the main-model review.
 
-Leave it at `auto` (or set it to your main model) and nothing changes — the
-review keeps running on the main model with the full warm-cache replay.
+Leave it at `auto` (or set it to your main model) and the review still runs on the main model,
+reusing its warm prompt-cache prefix — replaying the full conversation snapshot, unless the
+parent chat is itself already at or above 80% of its own compression threshold, in which case
+the same-model review replays the same bounded digest as the routed path instead (so it doesn't
+burn a compaction pass on a disposable copy nobody keeps).
 
 ### Same-model review reasoning
 
 A review using the same model as the parent **always inherits the parent's reasoning effort**. Setting `auxiliary.background_review.reasoning_effort` does not override it, whether the route is `auto` or explicitly selects the parent provider/model.
 
-Reasoning settings, the system prompt, the full conversation snapshot, and tool definitions stay byte-identical to the parent at fork birth so the review can reuse its prompt-cache prefix. Changing only the review's thinking level would break that parity. There is no independent-effort switch for same-model reviews.
+Reasoning settings, the system prompt, and tool definitions stay byte-identical to the parent at fork birth so the review can reuse its prompt-cache prefix; so does the full conversation snapshot, except once the parent chat is already at or above 80% of its own compression threshold, when the review replays the same bounded digest the routed path always uses instead. Changing only the review's thinking level would break that parity. There is no independent-effort switch for same-model reviews.
 
 To reduce review work without changing the main conversation's effort, adjust `memory.nudge_interval` / `skills.creation_nudge_interval`, disable automatic reviews as described below, or route reviews to a different model. A different-model route uses a digest and does not share the parent's warm prefix; on that route `auxiliary.background_review.reasoning_effort` IS honored (unset = the routed provider's default). A one-time warning is printed when the key is set but the review stays on the main model. These frequency and routing controls do not decouple same-model reasoning.
 

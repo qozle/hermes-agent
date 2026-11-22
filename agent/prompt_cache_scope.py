@@ -223,13 +223,20 @@ def is_fork_cache_scope(scope: Any) -> bool:
 
 
 def _apply_fork_tag(agent: Any, scope: str) -> str:
-    """``<scope>::<tag>`` for a tagged fork on a slot-keyed route, once the fork's OWN compaction
-    committed: before it the fork extends the parent's prefix (warm read, #109964); after it the
-    rewritten stream would evict the parent's xAI slot. Read per call, so fallbacks re-evaluate."""
+    """``<scope>::<tag>`` for a tagged fork on a slot-keyed route, once its stream has diverged
+    from the parent's prefix: either the fork's OWN compaction committed (``compression_count >=
+    1``), or request #1 itself already diverges — a same-model review whose first request replays
+    the bounded digest instead of the full snapshot (``_prompt_cache_fork_diverged``, stamped by
+    ``_run_review_fork`` alongside its ``use_digest`` decision). Before either, the fork extends
+    the parent's prefix (warm read, #109964); after, the rewritten stream would evict the parent's
+    xAI slot. A shared ``session_id`` means clearing ``_inherited_cache_scope`` alone cannot fix
+    this: the fallback lineage walk resolves right back to the same physical key. Read per call,
+    so fallbacks re-evaluate."""
     tag = getattr(agent, "_prompt_cache_fork_tag", None)
     if not scope or not isinstance(tag, str) or not tag:
         return scope
-    if getattr(getattr(agent, "context_compressor", None), "compression_count", 0) < 1:
+    compacted = getattr(getattr(agent, "context_compressor", None), "compression_count", 0) >= 1
+    if not compacted and not getattr(agent, "_prompt_cache_fork_diverged", False):
         return scope
     if not is_slot_keyed_cache_route(
         getattr(agent, "provider", ""), getattr(agent, "model", ""), getattr(agent, "base_url", ""),
