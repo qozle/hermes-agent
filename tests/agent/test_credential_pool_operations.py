@@ -64,7 +64,43 @@ def test_priority_persists_contiguous_order_without_clearing_cooldown():
 
 
 def test_priority_honors_anthropic_manual_first():
+    # Without an explicit order the load-time rule still puts manual logins first.
+    from agent.credential_pool import _normalize_pool_priorities
+
     pool = _pool("anthropic")
-    pool._entries[1] = replace(pool._entries[1], source="env:ANTHROPIC_API_KEY")
-    assert pool.move_entry("row1", 0).priority == 1
-    assert [e.id for e in pool.entries()] == ["row0", "row1"]
+    entries = [replace(pool._entries[0], priority=1),
+               replace(pool._entries[1], source="env:ANTHROPIC_API_KEY", priority=0)]
+    assert _normalize_pool_priorities("anthropic", entries)
+    assert sorted((e.priority, e.id) for e in entries) == [(0, "row0"), (1, "row1")]
+
+
+def test_explicit_priority_puts_a_seeded_anthropic_login_first_and_survives_reload():
+    # `hermes auth priority` is the user's order: it may put a seeded login (claude_code)
+    # ahead of a manual one, and the load-time normalizer must not undo it.
+    from agent.credential_pool import _normalize_pool_priorities
+
+    pool = _pool("anthropic")
+    pool._entries[1] = replace(pool._entries[1], source="claude_code")
+    assert pool.move_entry("row1", 0).priority == 0
+    assert [e.id for e in pool.entries()] == ["row1", "row0"]
+    stored = read_credential_pool("anthropic")
+    assert [e["id"] for e in stored] == ["row1", "row0"]
+    assert all(e.get("priority_pinned") is True for e in stored)
+    reloaded = [PooledCredential.from_dict("anthropic", e) for e in stored]
+    assert not _normalize_pool_priorities("anthropic", reloaded)
+    assert [e.id for e in sorted(reloaded, key=lambda e: e.priority)] == ["row1", "row0"]
+
+
+def test_a_login_added_after_an_explicit_order_goes_after_it():
+    from agent.credential_pool import _normalize_pool_priorities
+
+    pool = _pool("anthropic")
+    pool._entries[1] = replace(pool._entries[1], source="claude_code")
+    pool.move_entry("row1", 0)
+    newcomer = PooledCredential(
+        provider="anthropic", id="row2", label="account2", source="manual",
+        auth_type="api_key", access_token="fixture-2", priority=0,
+    )
+    entries = [*pool.entries(), newcomer]
+    _normalize_pool_priorities("anthropic", entries)
+    assert [e.id for e in sorted(entries, key=lambda e: e.priority)] == ["row1", "row0", "row2"]

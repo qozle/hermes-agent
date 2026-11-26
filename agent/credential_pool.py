@@ -2485,15 +2485,30 @@ _ANTHROPIC_SOURCE_RANK = {
 }
 
 
+PRIORITY_PINNED_KEY = "priority_pinned"
+
+
+def _is_priority_pinned(entry: PooledCredential) -> bool:
+    return bool(entry.extra.get(PRIORITY_PINNED_KEY))
+
+
 def _normalize_pool_priorities(provider: str, entries: list[PooledCredential]) -> bool:
     if provider != "anthropic":
         return False
+    # An order set with ``hermes auth priority`` is the user's (local commit #38): those
+    # entries keep their relative order ahead of everything else, seeded or manual. Only
+    # entries that arrived since are placed by the default rule (manual first), after them.
+    pinned_entries = sorted(
+        (entry for entry in entries if _is_priority_pinned(entry)),
+        key=lambda entry: entry.priority,
+    )
+    unpinned = [entry for entry in entries if not _is_priority_pinned(entry)]
     manual_entries = sorted(
-        (entry for entry in entries if _is_manual_source(entry.source)),
+        (entry for entry in unpinned if _is_manual_source(entry.source)),
         key=lambda entry: entry.priority,
     )
     seeded_entries = sorted(
-        (entry for entry in entries if not _is_manual_source(entry.source)),
+        (entry for entry in unpinned if not _is_manual_source(entry.source)),
         key=lambda entry: (
             _ANTHROPIC_SOURCE_RANK.get(entry.source, len(_ANTHROPIC_SOURCE_RANK)),
             entry.priority,
@@ -2502,7 +2517,7 @@ def _normalize_pool_priorities(provider: str, entries: list[PooledCredential]) -
     )
     id_to_idx = {entry.id: idx for idx, entry in enumerate(entries)}
     changed = False
-    for new_priority, entry in enumerate([*manual_entries, *seeded_entries]):
+    for new_priority, entry in enumerate([*pinned_entries, *manual_entries, *seeded_entries]):
         if entry.priority != new_priority:
             entries[id_to_idx[entry.id]] = replace(entry, priority=new_priority)
             changed = True
