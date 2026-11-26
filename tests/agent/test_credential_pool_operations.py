@@ -85,10 +85,35 @@ def test_explicit_priority_puts_a_seeded_anthropic_login_first_and_survives_relo
     assert [e.id for e in pool.entries()] == ["row1", "row0"]
     stored = read_credential_pool("anthropic")
     assert [e["id"] for e in stored] == ["row1", "row0"]
-    assert all(e.get("priority_pinned") is True for e in stored)
+    assert [e.get("priority_pinned") for e in stored] == [1, 2]
     reloaded = [PooledCredential.from_dict("anthropic", e) for e in stored]
     assert not _normalize_pool_priorities("anthropic", reloaded)
     assert [e.id for e in sorted(reloaded, key=lambda e: e.priority)] == ["row1", "row0"]
+
+
+def test_a_stale_process_rewriting_priorities_manual_first_is_undone_on_the_next_load():
+    # A gateway, dashboard or terminal still running pre-#38 code re-sorts ``priority``
+    # manual-first and persists it, carrying the extra keys through untouched.
+    from agent.credential_pool import _normalize_pool_priorities
+
+    pool = _pool("anthropic")
+    pool._entries[1] = replace(pool._entries[1], source="claude_code")
+    pool.move_entry("row1", 0)
+    by_id = {e.id: e for e in pool.entries()}
+    stale = [replace(by_id["row0"], priority=0), replace(by_id["row1"], priority=1)]
+    assert _normalize_pool_priorities("anthropic", stale)
+    assert [e.id for e in sorted(stale, key=lambda e: e.priority)] == ["row1", "row0"]
+
+
+def test_a_legacy_true_pin_keeps_the_stored_priority_order():
+    from agent.credential_pool import _normalize_pool_priorities
+
+    pool = _pool("anthropic")
+    rows = [replace(pool._entries[0], priority=1, extra={"priority_pinned": True}),
+            replace(pool._entries[1], source="claude_code", priority=0,
+                    extra={"priority_pinned": True})]
+    assert not _normalize_pool_priorities("anthropic", rows)
+    assert [e.id for e in sorted(rows, key=lambda e: e.priority)] == ["row1", "row0"]
 
 
 def test_a_login_added_after_an_explicit_order_goes_after_it():

@@ -71,8 +71,8 @@ class CredentialPoolAdminMixin:
     def move_entry(self, credential_id: str, priority: int) -> Optional[PooledCredential]:
         """Place an entry at a clamped zero-based position and persist contiguous priorities.
 
-        For anthropic the resulting order is pinned (``priority_pinned`` on every row), so the
-        load-time manual-before-seeded rule no longer overrides it (local commit #38).
+        For anthropic the resulting order is pinned (``priority_pinned`` = the row's 1-based rank),
+        so the load-time manual-before-seeded rule no longer overrides it (local commit #38).
         """
         from agent.credential_pool import PRIORITY_PINNED_KEY, _normalize_pool_priorities
 
@@ -84,7 +84,7 @@ class CredentialPoolAdminMixin:
             others.insert(max(0, min(int(priority), len(others))), entry)
             pin = self.provider == "anthropic"
             entries = [
-                replace(e, priority=p, extra={**e.extra, PRIORITY_PINNED_KEY: True} if pin else e.extra)
+                replace(e, priority=p, extra={**e.extra, PRIORITY_PINNED_KEY: p + 1} if pin else e.extra)
                 for p, e in enumerate(others)
             ]
             # Apply load-time ordering now so the reported position survives reload.

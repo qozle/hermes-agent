@@ -2489,7 +2489,23 @@ PRIORITY_PINNED_KEY = "priority_pinned"
 
 
 def _is_priority_pinned(entry: PooledCredential) -> bool:
-    return bool(entry.extra.get(PRIORITY_PINNED_KEY))
+    value = entry.extra.get(PRIORITY_PINNED_KEY)
+    return value is not None and value is not False
+
+
+def _pinned_rank(entry: PooledCredential) -> int:
+    """The user's position for a pinned row.
+
+    Stored as an int rank in ``extra`` rather than read from ``priority``: a process still
+    running pre-#38 code re-sorts ``priority`` manual-first and persists it, but carries
+    unknown extra keys through untouched, so the rank survives and the next load restores
+    the user's order. 1-based so a process on the first #38 commit (``bool(value)``) still
+    reads every pinned row as pinned. A legacy ``True`` flag falls back to the row's priority.
+    """
+    value = entry.extra.get(PRIORITY_PINNED_KEY)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return entry.priority
+    return value
 
 
 def _normalize_pool_priorities(provider: str, entries: list[PooledCredential]) -> bool:
@@ -2500,7 +2516,7 @@ def _normalize_pool_priorities(provider: str, entries: list[PooledCredential]) -
     # entries that arrived since are placed by the default rule (manual first), after them.
     pinned_entries = sorted(
         (entry for entry in entries if _is_priority_pinned(entry)),
-        key=lambda entry: entry.priority,
+        key=lambda entry: (_pinned_rank(entry), entry.priority),
     )
     unpinned = [entry for entry in entries if not _is_priority_pinned(entry)]
     manual_entries = sorted(
