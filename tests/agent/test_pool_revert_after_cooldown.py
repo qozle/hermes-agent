@@ -9,6 +9,8 @@ its whole life. Credential-only: it must not touch the model/base_url/compressor
 
 import time
 
+import run_agent  # imported at collection: its dependency activation reads the real manifest.json, which the home-IO guard refuses inside a test
+
 import agent.credential_pool as cp
 from agent.agent_runtime_helpers import recover_with_credential_pool, restore_primary_runtime
 from agent.credential_pool import EXHAUSTED_TTL_429_SECONDS, CredentialPool, PooledCredential
@@ -66,9 +68,8 @@ def test_live_session_reverts_to_quota_benched_credential_once_cooldown_lifts(mo
     agent = _LiveAgent(pool)
     assert agent.api_key == "sk-ant-oat01-PREF"
 
-    # 429 twice = retry once, then rotate (the real rate-limit ladder).
-    recover_with_credential_pool(agent, status_code=429, has_retried_429=False, error_context={"message": "Error"})
-    recovered, _ = recover_with_credential_pool(agent, status_code=429, has_retried_429=True, error_context={"message": "Error"})
+    # A 429 with another seat free rotates at once (local commit #39; upstream retried once first).
+    recovered, _ = recover_with_credential_pool(agent, status_code=429, has_retried_429=False, error_context={"message": "Error"})
     assert recovered and agent.api_key == "sk-ant-api03-FALL"
 
     # Control: while the bench is still active the session stays on the fallback.
@@ -98,8 +99,7 @@ def test_live_session_reverts_to_quota_benched_credential_once_cooldown_lifts(mo
     late = _LiveAgent(pool2)
     assert late.api_key == "sk-ant-api03-FALL"
     _expire_cooldowns(monkeypatch, real_time, 1)  # pref's window reopened; fall benched from now
-    recover_with_credential_pool(late, status_code=429, has_retried_429=False, error_context={"message": "Error"})
-    recovered, _ = recover_with_credential_pool(late, status_code=429, has_retried_429=True, error_context={"message": "Error"})
+    recovered, _ = recover_with_credential_pool(late, status_code=429, has_retried_429=False, error_context={"message": "Error"})
     assert recovered and late.api_key == "sk-ant-oat01-PREF"
     assert getattr(late, "_credential_pool_revert_id", None) is None  # rotated UP: nothing to revert to
     _expire_cooldowns(monkeypatch, real_time, 2)  # fall's cooldown lifts too

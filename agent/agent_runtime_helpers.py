@@ -938,7 +938,9 @@ def _recover_auth_failure(agent, pool, **kwargs):
     return recover_auth_failure(agent, pool, **kwargs)
 
 
-def _recover_rate_limit(pool, *, has_retried_429, error_context, api_key_hint, credential_id, rotate_and_swap):
+def _recover_rate_limit(
+    pool, *, has_retried_429, error_context, api_key_hint, credential_id, rotate_and_swap, model=None,
+):
     # Already-exhausted credential: rotate immediately. Avoids the "cancel-between-429s" trap where
     # the local has_retried_429 resets per prompt and retries forever.
     current_entry = None
@@ -965,8 +967,30 @@ def _recover_rate_limit(pool, *, has_retried_429, error_context, api_key_hint, c
             t in context_message for t in _USAGE_LIMIT_MESSAGE_TOKENS
         )
     if not has_retried_429 and not usage_limit_reached:
-        return False, True
+        # Local commit #39: a seat that 429s is not waited on (Retry-After up to
+        # RETRY_AFTER_CAP_S) while another seat can serve this model — rotate now. The
+        # retry-same-seat rung stays for a pool with nowhere else to go.
+        if not _other_entry_available(pool, current_entry, model):
+            return False, True
+        _ra().logger.info(
+            "Rate limited on %s with another credential free for %s — rotating instead of waiting",
+            getattr(current_entry, "label", None) or getattr(current_entry, "id", "?"), model,
+        )
     return (True, False) if rotate_and_swap(429, "rate limit") else (False, True)
+
+
+def _other_entry_available(pool, current_entry, model) -> bool:
+    """True when the pool has an entry other than the throttled one free for ``model`` now.
+    Strict: an unknown failed identity or a pool without the probe keeps the old ladder."""
+    entry_id = getattr(current_entry, "id", None)
+    probe = getattr(pool, "has_available_besides", None)
+    if not isinstance(entry_id, str) or not entry_id or not callable(probe):
+        return False
+    try:
+        return probe(entry_id, model=model) is True
+    except Exception as exc:  # a probe failure must not turn a 429 into a crash
+        _ra().logger.debug("credential pool availability probe failed: %s", exc)
+        return False
 
 
 def recover_with_credential_pool(
@@ -975,7 +999,8 @@ def recover_with_credential_pool(
     error_context: Optional[dict[str, Any]] = None, billing_unverified: bool = False,
 ) -> tuple[bool, bool]:
     """Attempt credential recovery via pool rotation; returns (recovered, has_retried_429).
-    Rate limits: retry once, then rotate. Billing: rotate immediately. Auth: refresh before
+    Rate limits: rotate at once when another entry is free for the model (local commit #39),
+    else retry once, then rotate. Billing: rotate immediately. Auth: refresh before
     rotating. ``classified_reason`` beats raw HTTP codes (e.g. Anthropic 400 "out of extra
     usage"); ``billing_unverified`` gives the entry a short cooldown, not the one-hour bench."""
     pool = agent._credential_pool
@@ -1080,6 +1105,7 @@ def recover_with_credential_pool(
         return _recover_rate_limit(
             pool, has_retried_429=has_retried_429, error_context=error_context,
             api_key_hint=api_key_hint, credential_id=credential_id, rotate_and_swap=_rotate_and_swap,
+            model=getattr(agent, "model", None),
         )
     if effective_reason == FailoverReason.model_entitlement:
         # The pool benches (credential, model) only and hands back the next entry that is not

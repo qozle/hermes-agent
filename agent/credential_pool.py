@@ -1008,6 +1008,17 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             available, _pending = self._available_entries(model=model)
             return bool(available)
 
+    def has_available_besides(self, entry_id: str, *, model: Optional[str] = None) -> bool:
+        """True if an entry other than ``entry_id`` can serve ``model`` now (local commit #39).
+
+        The rate-limit ladder asks this on the first 429 so it rotates to a free seat instead
+        of waiting out the throttled one. Under ``self._lock`` for the reason ``has_available``
+        gives.
+        """
+        with self._lock:
+            available, _pending = self._available_entries(model=model)
+            return any(entry.id != entry_id for entry in available)
+
     def lift_reopened_cooldowns(self, *, model: Optional[str] = None) -> bool:
         """Clear cooldowns that have elapsed or (Codex) reopened early, then report availability.
 
