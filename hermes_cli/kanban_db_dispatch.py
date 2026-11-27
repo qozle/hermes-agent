@@ -143,6 +143,10 @@ class DispatchResult:
     """LOCAL COMMIT (frankentrait): ``(task_id, origin_key, current_running_count)``
     deferred because the conversation that opened the card already has
     ``kanban.max_in_progress_per_origin`` cards running."""
+    skipped_slot_held: list[str] = field(default_factory=list)
+    """LOCAL COMMIT (frankentrait): new cards not started because every slot of
+    ``max_in_progress`` is running or held by a started card still in review or
+    in fix rounds (``kanban.hold_slot_through_review``)."""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
@@ -1984,6 +1988,51 @@ def count_running_tasks_by_lane(conn: sqlite3.Connection) -> dict[str, int]:
 NO_ORIGIN_KEY = ""
 
 
+def configured_hold_slot_through_review() -> bool:
+    """LOCAL COMMIT (frankentrait): ``kanban.hold_slot_through_review``.
+
+    When true, a card that has started keeps one of the ``max_in_progress``
+    slots until it is done — while it waits for its reviewer and through its
+    fix rounds — so a new card cannot take its place. Re-read every tick."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        raw = (load_config_readonly() or {}).get("kanban", {}).get("hold_slot_through_review")
+    except Exception:
+        return False
+    return raw is True or str(raw).strip().lower() in ("true", "1", "yes", "on")
+
+
+def held_slots(conn: sqlite3.Connection) -> tuple[set[str], set[str]]:
+    """``(held, fix_parents)`` for :func:`configured_hold_slot_through_review`.
+
+    ``held``: cards that started (have a run) and are not running, done,
+    blocked or archived — waiting in ``review``, or back in ``todo``/``ready``
+    for a fix round or a retry. Any ``review`` card counts too. A ``todo`` card
+    with a running parent is not counted: that run (its fix round) already
+    fills the slot. ``fix_parents``: the unstarted ``todo``/``ready`` parents of
+    held ``todo`` cards — Round-N fix cards — which spawn into that slot."""
+    held: set[str] = set()
+    fix_parents: set[str] = set()
+    rows = conn.execute(
+        "SELECT t.id, t.status FROM tasks t WHERE t.status = 'review' "
+        "OR (t.status IN ('todo', 'ready') AND EXISTS "
+        "(SELECT 1 FROM task_runs r WHERE r.task_id = t.id))"
+    ).fetchall()
+    for row in rows:
+        tid, status = row[0], row[1]
+        if status == "todo":
+            parents = conn.execute(
+                "SELECT p.id, p.status FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+                "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived')",
+                (tid,),
+            ).fetchall()
+            if any(pr[1] == "running" for pr in parents):
+                continue
+            fix_parents.update(pr[0] for pr in parents if pr[1] in ("todo", "ready"))
+        held.add(tid)
+    return held, fix_parents
+
+
 def configured_max_in_progress_per_origin() -> Optional[int]:
     """``kanban.max_in_progress_per_origin`` as a positive int, or None
     (unset/invalid = no per-origin cap). Read per tick like the other caps."""
@@ -2157,6 +2206,7 @@ def dispatch_once(
     reconcile_orphans: bool = True,
     max_in_progress_per_lane: Optional[Mapping[str, Any]] = None,
     max_in_progress_per_origin: Optional[int] = None,
+    hold_slots: Optional[bool] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2182,6 +2232,7 @@ def dispatch_once(
             reconcile_orphans=reconcile_orphans,
             max_in_progress_per_lane=max_in_progress_per_lane,
             max_in_progress_per_origin=max_in_progress_per_origin,
+            hold_slots=hold_slots,
         )
 
     try:
@@ -2562,6 +2613,7 @@ def _dispatch_once_locked(
     reconcile_orphans: bool = True,
     max_in_progress_per_lane: Optional[Mapping[str, Any]] = None,
     max_in_progress_per_origin: Optional[int] = None,
+    hold_slots: Optional[bool] = None,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
@@ -2642,6 +2694,18 @@ def _dispatch_once_locked(
         per_origin_cap=per_origin_cap, per_origin_running=per_origin_running,
     )
     default_assignee = _resolve_default_assignee(default_assignee)
+    # LOCAL COMMIT (frankentrait): a started card holds its slot through review
+    # and fix rounds. New cards may only use slots nobody runs or holds; a held
+    # card coming back (retry) or its fix card spawns into its own slot.
+    if hold_slots is None:
+        hold_slots = configured_hold_slot_through_review()
+    new_budget: Optional[int] = None
+    held: set[str] = set()
+    fix_parents: set[str] = set()
+    if hold_slots and max_in_progress is not None:
+        held, fix_parents = held_slots(conn)
+        new_budget = max(int(max_in_progress) - count_running_tasks(conn) - len(held), 0)
+    new_spawned = 0
     spawned = 0
     for row in ready_rows:
         if ready_budget is not None and spawned >= ready_budget:
@@ -2659,9 +2723,15 @@ def _dispatch_once_locked(
                 continue
             row_assignee = default_assignee
             result.auto_assigned_default.append(row["id"])
+        is_new = row["id"] not in held and row["id"] not in fix_parents
+        if new_budget is not None and is_new and new_spawned >= new_budget:
+            result.skipped_slot_held.append(row["id"])
+            continue
         if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
             spawned += 1
             lane_spawned["ready"] += 1
+            if is_new:
+                new_spawned += 1
 
     # A review agent (sdlc-review) approves (→ done) or requests changes
     # (→ ready/todo). Review spawns share max_spawn with ready tasks. The loop
