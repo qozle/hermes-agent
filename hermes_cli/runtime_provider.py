@@ -872,9 +872,36 @@ def _azure_anthropic_env_key(model_cfg: dict[str, Any]) -> str:
             or get_secret_str("ANTHROPIC_API_KEY", "").strip())
 
 
+def _anthropic_seat_pool(base_url: str):
+    """The Anthropic credential pool to bind to a runtime resolved OUTSIDE the pool rung.
+
+    Local commit #40: ``_resolve_from_pool`` attaches the pool only when ``select(model=…)``
+    hands back a seat. A momentary miss (every seat benched for the model, a deferred token
+    refresh) dropped the ladder onto the env/borrowed-login rung, whose runtime carried no
+    pool — and ``recover_with_credential_pool`` then returns at ``pool is None``, silently, so
+    the session held ONE static credential for its whole life and a 429 waited out the retry
+    ladder instead of rotating (live 2026-11-26, kanban card t_98f53e96, tier opus-high).
+    Binding the pool here leaves the rung's own credential in place for the first request and
+    gives the session the seats to rotate onto. Native ``api.anthropic.com`` only: the seats
+    do not serve an Azure Foundry or proxy endpoint.
+    """
+    from agent.anthropic_credentials import is_native_anthropic_host
+    if not is_native_anthropic_host(base_url):
+        return None
+    try:
+        pool = load_pool("anthropic")
+    except Exception:
+        logger.debug("Anthropic seat pool unavailable for the env runtime", exc_info=True)
+        return None
+    if pool is None or not pool.has_credentials():
+        return None
+    return pool if credential_pool_matches_provider(pool, "anthropic", base_url=base_url) else None
+
+
 def _anthropic_env_runtime(requested_provider: str, model_cfg: dict[str, Any], target_model: str | None = None) -> dict[str, Any]:
     """Native Anthropic (Messages API) from env/auth store; ``model.base_url`` honoured only when
-    the configured provider is anthropic (else a Codex endpoint would leak into Anthropic requests)."""
+    the configured provider is anthropic (else a Codex endpoint would leak into Anthropic requests).
+    The seat pool rides along (``_anthropic_seat_pool``) so this rung can still rotate."""
     base_url = _anthropic_cfg_base_url(model_cfg) or _ANTHROPIC_DEFAULT_BASE_URL
     # Microsoft Foundry endpoints reject Claude Code OAuth tokens, which resolve_anthropic_token()
     # would return first — use the env key directly.
@@ -885,7 +912,8 @@ def _anthropic_env_runtime(requested_provider: str, model_cfg: dict[str, Any], t
                             "key_env/api_key_env in your config.yaml model section at a custom env var.")
     else:
         token = _anthropic_token_or_raise(model=target_model)
-    return _runtime("anthropic", "anthropic_messages", base_url, token, source="env", requested_provider=requested_provider)
+    return _runtime("anthropic", "anthropic_messages", base_url, token, source="env", requested_provider=requested_provider,
+                    credential_pool=_anthropic_seat_pool(base_url))
 
 
 def _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, target_model) -> dict[str, Any]:

@@ -974,20 +974,32 @@ def _recover_rate_limit(
             return False, True
         _ra().logger.info(
             "Rate limited on %s with another credential free for %s — rotating instead of waiting",
-            getattr(current_entry, "label", None) or getattr(current_entry, "id", "?"), model,
+            (getattr(current_entry, "label", None) or getattr(current_entry, "id", None)
+             or "an unidentified credential"), model,
         )
     return (True, False) if rotate_and_swap(429, "rate limit") else (False, True)
 
 
 def _other_entry_available(pool, current_entry, model) -> bool:
     """True when the pool has an entry other than the throttled one free for ``model`` now.
-    Strict: an unknown failed identity or a pool without the probe keeps the old ladder."""
-    entry_id = getattr(current_entry, "id", None)
+
+    Local commit #40: the failed credential is often NOT attributable — a kanban worker or a
+    delegated subagent whose runtime came from the env/borrowed-login rung carries a key that
+    matches no pool row and no entry id. Answering False there made ``_recover_rate_limit``
+    return without rotating AND without a log, so the turn waited out the 600 s retry ladder
+    beside a free seat (live 2026-11-26, card t_98f53e96). With no identity to exclude, ask the
+    weaker question instead: can ANY entry serve this model right now? A pool without the probe
+    keeps the old ladder.
+    """
     probe = getattr(pool, "has_available_besides", None)
-    if not isinstance(entry_id, str) or not entry_id or not callable(probe):
+    entry_id = getattr(current_entry, "id", None)
+    if not callable(probe):
         return False
     try:
-        return probe(entry_id, model=model) is True
+        if isinstance(entry_id, str) and entry_id:
+            return probe(entry_id, model=model) is True
+        any_available = getattr(pool, "has_available", None)
+        return callable(any_available) and any_available(model=model) is True
     except Exception as exc:  # a probe failure must not turn a 429 into a crash
         _ra().logger.debug("credential pool availability probe failed: %s", exc)
         return False
